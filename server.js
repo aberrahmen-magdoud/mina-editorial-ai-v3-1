@@ -1447,6 +1447,71 @@ app.post("/feedback/like", (req, res) => {
     });
   }
 });
+// =========================
+// PART 7 – Shopify Flow credit top-up webhook
+// =========================
+
+/**
+ * Shopify Flow should POST JSON like:
+ * {
+ *   "secret": "same-value-as-env-SHOPIFY_FLOW_WEBHOOK_SECRET",
+ *   "customerId": "8766256578643",
+ *   "credits": 50
+ * }
+ *
+ * We then add those credits to that Mina customer.
+ */
+app.post("/api/credits/shopify-topup", async (req, res) => {
+  try {
+    const { secret, customerId, credits } = req.body || {};
+
+    // 1) Simple auth using shared secret
+    if (!secret || secret !== process.env.SHOPIFY_FLOW_WEBHOOK_SECRET) {
+      return res.status(401).json({
+        ok: false,
+        error: "UNAUTHORIZED",
+        message: "Invalid webhook secret"
+      });
+    }
+
+    // 2) Basic validation
+    if (!customerId || !credits) {
+      return res.status(400).json({
+        ok: false,
+        error: "INVALID_PAYLOAD",
+        message: "customerId and credits are required"
+      });
+    }
+
+    const numericCredits = Number(credits);
+    if (!Number.isFinite(numericCredits) || numericCredits <= 0) {
+      return res.status(400).json({
+        ok: false,
+        error: "INVALID_CREDITS",
+        message: "credits must be a positive number"
+      });
+    }
+
+    // 3) Use existing addCredits helper (from earlier code)
+    //    If your helper has a slightly different name,
+    //    replace `addCredits` with that name.
+    const updated = addCredits(String(customerId), numericCredits, "shopify-topup");
+
+    return res.json({
+      ok: true,
+      message: "Credits added from Shopify",
+      balance: updated.balance,
+      delta: numericCredits
+    });
+  } catch (err) {
+    console.error("Error in /api/credits/shopify-topup:", err);
+    return res.status(500).json({
+      ok: false,
+      error: "INTERNAL_ERROR",
+      message: "Failed to process Shopify top-up webhook"
+    });
+  }
+});
 
 // =======================
 // Start server
