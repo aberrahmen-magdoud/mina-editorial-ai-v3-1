@@ -71,14 +71,20 @@ app.get("/health", (req, res) => {
 });
 
 // =======================
-// PART 2 – GPT helpers
+// PART 2 – GPT helpers (with vision + style history)
 // =======================
 
-async function runChatWithFallback({ systemMessage, userMessage, fallbackPrompt }) {
+async function runChatWithFallback({ systemMessage, userContent, fallbackPrompt }) {
   try {
     const completion = await openai.chat.completions.create({
       model: "gpt-4.1-mini",
-      messages: [systemMessage, userMessage],
+      messages: [
+        systemMessage,
+        {
+          role: "user",
+          content: userContent, // can be string OR [{type:'text'},{type:'image_url'},...]
+        },
+      ],
       temperature: 0.8,
       max_tokens: 280,
     });
@@ -100,7 +106,7 @@ async function runChatWithFallback({ systemMessage, userMessage, fallbackPrompt 
   }
 }
 
-// Build Mina's SeaDream prompt (image), with style memory
+// ---- Build Mina's SeaDream prompt (image) with vision + history ----
 async function buildEditorialPrompt(payload) {
   const {
     productImageUrl,
@@ -137,15 +143,14 @@ async function buildEditorialPrompt(payload) {
     role: "system",
     content:
       "You are Mina, an editorial art director for fashion & beauty. " +
+      "You will see one product image and up to 3 style reference images. " +
       "You write ONE clear prompt for a generative image model. " +
       "The model only understands English descriptions, not URLs. " +
       "Describe subject, environment, lighting, camera, mood, and style. " +
       "Do NOT include line breaks, lists, or bullet points. One paragraph max.",
   };
 
-  const userMessage = {
-    role: "user",
-    content: `
+  const userText = `
 You are creating a new ${mode} for Mina.
 
 Current request brief:
@@ -154,27 +159,53 @@ ${safeString(brief, "No extra brand context provided.")}
 Tone / mood: ${safeString(tone, "not specified")}
 Target platform: ${platform}
 
-Product image URL (reference only, do NOT mention URL in the prompt):
-${safeString(productImageUrl, "none")}
-
-Style reference image URLs (reference only, do NOT mention URLs in prompt):
-${(styleImageUrls || []).join(", ") || "none"}
-
 Recent successful prompts this customer used (respect this style when possible):
 ${historyText}
 
+The attached images are:
+- Main product image as the hero subject
+- Up to 3 style/mood references for lighting, color, and composition
+
 Write the final prompt I should send to the image model.
-`.trim(),
-  };
+`.trim();
+
+  // Build vision content: first text, then product + up to 3 style refs as images
+  const imageParts = [];
+  if (productImageUrl) {
+    imageParts.push({
+      type: "image_url",
+      image_url: { url: productImageUrl },
+    });
+  }
+  (styleImageUrls || [])
+    .slice(0, 3)
+    .filter((url) => !!url)
+    .forEach((url) => {
+      imageParts.push({
+        type: "image_url",
+        image_url: { url },
+      });
+    });
+
+  const userContent =
+    imageParts.length > 0
+      ? [
+          {
+            type: "text",
+            text: userText,
+          },
+          ...imageParts,
+        ]
+      : userText; // if no images, we just send text
 
   return runChatWithFallback({
     systemMessage,
-    userMessage,
+    userContent,
     fallbackPrompt,
   });
 }
 
-// Build Mina's Kling prompt (motion), with style memory
+// ---- Build Mina's Kling prompt (motion) with vision + history ----
 async function buildMotionPrompt(options) {
   const {
     motionBrief,
@@ -206,15 +237,13 @@ async function buildMotionPrompt(options) {
     role: "system",
     content:
       "You are Mina, an editorial motion director for fashion & beauty. " +
+      "You will see a reference still frame. " +
       "You describe a SHORT looping product motion for a generative video model like Kling. " +
       "Keep it 1–2 sentences, no line breaks.",
   };
 
-  const userMessage = {
-    role: "user",
-    content: `
-Static reference frame URL (for you only, don't spell it out in the prompt):
-${safeString(lastImageUrl, "none")}
+  const userText = `
+You are creating a short motion loop based on the attached still frame.
 
 Desired motion description from the user:
 ${safeString(
@@ -225,19 +254,39 @@ ${safeString(
 Tone / feeling: ${safeString(tone, "not specified")}
 Target platform: ${platform}
 
-Recent still-image prompts this customer used (keep motion in same aesthetic family):
+Recent still-image prompts this customer used (keep motion in the same aesthetic family):
 ${historyText}
 
+The attached image is the reference frame to animate. Do NOT mention URLs. 
 Write the final video generation prompt.
-`.trim(),
-  };
+`.trim();
+
+  const imageParts = [];
+  if (lastImageUrl) {
+    imageParts.push({
+      type: "image_url",
+      image_url: { url: lastImageUrl },
+    });
+  }
+
+  const userContent =
+    imageParts.length > 0
+      ? [
+          {
+            type: "text",
+            text: userText,
+          },
+          ...imageParts,
+        ]
+      : userText;
 
   return runChatWithFallback({
     systemMessage,
-    userMessage,
+    userContent,
     fallbackPrompt,
   });
 }
+
 
 // =======================
 // PART 3 – API routes
