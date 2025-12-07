@@ -26,8 +26,13 @@ const openai = new OpenAI({
 // Models
 const SEADREAM_MODEL =
   process.env.SEADREAM_MODEL_VERSION || "bytedance/seedream-4";
-const KLING_MODEL =
-  process.env.KLING_MODEL_VERSION || "kwaivgi/kling-v2.1";
+const KLING_MODEL = process.env.KLING_MODEL_VERSION || "kwaivgi/kling-v2.1";
+
+// Shared secret for Shopify order webhook
+const SHOPIFY_ORDER_SECRET =
+  process.env.SHOPIFY_ORDER_WEBHOOK_SECRET ||
+  process.env.SHOPIFY_FLOW_WEBHOOK_SECRET ||
+  "";
 
 // =======================
 // PART 2 – Style presets
@@ -106,6 +111,7 @@ const feedbacks = new Map(); // feedbackId -> { ... }
 // PART 3b – Credits / coupons (in-memory)
 // =======================
 
+// Single credits map used EVERYWHERE
 const credits = new Map(); // customerId -> { balance, history: [{ delta, reason, source, at }] }
 
 // How many credits each operation costs
@@ -113,7 +119,7 @@ const IMAGE_CREDITS_COST = Number(process.env.IMAGE_CREDITS_COST || 1);
 const MOTION_CREDITS_COST = Number(process.env.MOTION_CREDITS_COST || 5);
 
 // Free credits ON FIRST USE, for testing. Set to 0 in production.
-const DEFAULT_FREE_CREDITS = Number(process.env.DEFAULT_FREE_CREDITS || 50);
+const DEFAULT_FREE_CREDITS = Number(process.env.DEFAULT_FREE_CREDITS || 0);
 
 function getCreditsRecord(customerIdRaw) {
   const customerId = String(customerIdRaw || "anonymous");
@@ -139,14 +145,58 @@ function getCreditsRecord(customerIdRaw) {
 
 function addCreditsInternal(customerIdRaw, delta, reason, source) {
   const customerId = String(customerIdRaw || "anonymous");
+  const amount = Number(delta || 0);
+  if (!Number.isFinite(amount) || amount === 0) {
+    return getCreditsRecord(customerId);
+  }
+
   const rec = getCreditsRecord(customerId);
-  rec.balance += delta;
+  rec.balance += amount;
   rec.history.push({
-    delta,
+    delta: amount,
     reason: reason || "adjustment",
     source: source || "api",
     at: new Date().toISOString(),
   });
+
+  console.log(
+    `[CREDITS] +${amount} for ${customerId}. New balance: ${rec.balance}. Reason: ${
+      reason || "adjustment"
+    }`
+  );
+
+  return rec;
+}
+
+function deductCreditsInternal(customerIdRaw, delta, reason, source) {
+  const customerId = String(customerIdRaw || "anonymous");
+  const amount = Number(delta || 0);
+  const rec = getCreditsRecord(customerId);
+
+  if (!Number.isFinite(amount) || amount <= 0) return rec;
+
+  if (rec.balance < amount) {
+    const err = new Error("INSUFFICIENT_CREDITS");
+    err.code = "INSUFFICIENT_CREDITS";
+    err.currentBalance = rec.balance;
+    err.required = amount;
+    throw err;
+  }
+
+  rec.balance -= amount;
+  rec.history.push({
+    delta: -amount,
+    reason: reason || "spend",
+    source: source || "api",
+    at: new Date().toISOString(),
+  });
+
+  console.log(
+    `[CREDITS] -${amount} for ${customerId}. New balance: ${rec.balance}. Reason: ${
+      reason || "spend"
+    }`
+  );
+
   return rec;
 }
 
@@ -781,11 +831,14 @@ app.get("/health", (req, res) => {
     time: new Date().toISOString(),
   });
 });
+
+// Root – small hint instead of Internal Server Error
 app.get("/", (req, res) => {
   res.json({
     ok: true,
     service: "Mina Editorial AI API",
-    hint: "Use /health, /editorial/generate, /motion/generate, or /api/credits/:customerId",
+    hint:
+      "Use /health, /editorial/generate, /motion/generate, /credits/balance, /api/credits/:customerId",
   });
 });
 
@@ -818,7 +871,7 @@ app.get("/credits/balance", (req, res) => {
   }
 });
 
-// ---- Credits: add (manual / via webhook) ----
+// ---- Credits: add (manual / via API) ----
 app.post("/credits/add", (req, res) => {
   const requestId = `req_${Date.now()}_${uuidv4()}`;
   try {
@@ -1036,13 +1089,12 @@ app.post("/editorial/generate", async (req, res) => {
     const imageUrl = imageUrls[0] || null;
 
     // Spend credits AFTER successful generation
-    creditsRecord.balance -= imageCost;
-    creditsRecord.history.push({
-      delta: -imageCost,
-      reason: "editorial-generate",
-      source: "api",
-      at: new Date().toISOString(),
-    });
+    const updatedCredits = deductCreditsInternal(
+      customerId,
+      imageCost,
+      "editorial-generate",
+      "api"
+    );
 
     // Store generation in in-memory DB
     const generationId = `gen_${uuidv4()}`;
@@ -1074,7 +1126,7 @@ app.post("/editorial/generate", async (req, res) => {
       generationId,
       sessionId,
       credits: {
-        balance: creditsRecord.balance,
+        balance: updatedCredits.balance,
         cost: imageCost,
       },
       gpt: {
@@ -1307,13 +1359,12 @@ app.post("/motion/generate", async (req, res) => {
     }
 
     // Spend credits AFTER successful generation
-    creditsRecord.balance -= motionCost;
-    creditsRecord.history.push({
-      delta: -motionCost,
-      reason: "motion-generate",
-      source: "api",
-      at: new Date().toISOString(),
-    });
+    const updatedCredits = deductCreditsInternal(
+      customerId,
+      motionCost,
+      "motion-generate",
+      "api"
+    );
 
     const generationId = `gen_${uuidv4()}`;
     generations.set(generationId, {
@@ -1352,7 +1403,7 @@ app.post("/motion/generate", async (req, res) => {
         stylePresetKey,
       },
       credits: {
-        balance: creditsRecord.balance,
+        balance: updatedCredits.balance,
         cost: motionCost,
       },
       gpt: {
@@ -1454,6 +1505,7 @@ app.post("/feedback/like", (req, res) => {
     });
   }
 });
+
 // =========================
 // PART 7 – Shopify credits integration (no Flow)
 // =========================
@@ -1481,7 +1533,14 @@ app.post("/api/credits/shopify-order", async (req, res) => {
   try {
     // 1) Simple shared-secret check via query param
     const secretFromQuery = req.query.secret;
-    if (!secretFromQuery || secretFromQuery !== process.env.SHOPIFY_ORDER_WEBHOOK_SECRET) {
+
+    if (!SHOPIFY_ORDER_SECRET) {
+      console.warn(
+        "[SHOPIFY_WEBHOOK] SHOPIFY_ORDER_WEBHOOK_SECRET / SHOPIFY_FLOW_WEBHOOK_SECRET not set in env."
+      );
+    }
+
+    if (!secretFromQuery || secretFromQuery !== SHOPIFY_ORDER_SECRET) {
       return res.status(401).json({
         ok: false,
         error: "UNAUTHORIZED",
@@ -1578,4 +1637,3 @@ app.get("/api/credits/:customerId", (req, res) => {
 app.listen(PORT, () => {
   console.log(`Mina Editorial AI API listening on port ${PORT}`);
 });
-
