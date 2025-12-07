@@ -1530,9 +1530,94 @@ app.get("/api/credits/:customerId", (req, res) => {
  * Example: "MINA-50-MACHTA" gives 50 credits per quantity 1.
  */
 const CREDIT_SKUS = {
-  "MINA-50-MACHTA": 50,
+  "MINA-50": 50,
   // later you can add e.g. "MINA-200-MACHTA": 200
 };
+// =========================
+// PART D – Shopify order webhook (no Flow)
+// =========================
+
+/**
+ * Shopify Admin will POST the full order JSON to:
+ *   /api/credits/shopify-order?secret=YOUR_SECRET
+ *
+ * We:
+ *  - verify the query secret
+ *  - sum credits for any line_items whose sku is in CREDIT_SKUS
+ *  - add those credits to that customerId
+ */
+app.post("/api/credits/shopify-order", async (req, res) => {
+  try {
+    // 1) Simple shared-secret check via query param
+    const secretFromQuery = req.query.secret;
+    if (!secretFromQuery || secretFromQuery !== process.env.SHOPIFY_ORDER_WEBHOOK_SECRET) {
+      return res.status(401).json({
+        ok: false,
+        error: "UNAUTHORIZED",
+        message: "Invalid webhook secret",
+      });
+    }
+
+    const order = req.body;
+    if (!order) {
+      return res.status(400).json({
+        ok: false,
+        error: "NO_ORDER",
+        message: "Missing order payload",
+      });
+    }
+
+    if (!order.customer || !order.customer.id) {
+      return res.status(400).json({
+        ok: false,
+        error: "NO_CUSTOMER",
+        message: "Order has no customer.id",
+      });
+    }
+
+    const customerId = String(order.customer.id);
+
+    let creditsToAdd = 0;
+    const items = order.line_items || [];
+
+    for (const item of items) {
+      const sku = item.sku;
+      const quantity = item.quantity || 1;
+
+      if (sku && CREDIT_SKUS[sku]) {
+        const perUnit = CREDIT_SKUS[sku];
+        const totalForItem = perUnit * quantity;
+        creditsToAdd += totalForItem;
+      }
+    }
+
+    if (creditsToAdd <= 0) {
+      console.log("[SHOPIFY_WEBHOOK] Order has no credit SKUs. Doing nothing.");
+      return res.json({
+        ok: true,
+        message: "No credit products found in order.",
+        added: 0,
+      });
+    }
+
+    const updated = addCredits(customerId, creditsToAdd, `shopify-order:${order.id || "unknown"}`);
+
+    return res.json({
+      ok: true,
+      message: "Credits added from Shopify order.",
+      customerId,
+      added: creditsToAdd,
+      balance: updated.balance,
+    });
+  } catch (err) {
+    console.error("Error in /api/credits/shopify-order:", err);
+    return res.status(500).json({
+      ok: false,
+      error: "INTERNAL_ERROR",
+      message: "Failed to process Shopify order webhook",
+    });
+  }
+});
 
 
 // =======================
