@@ -1618,7 +1618,157 @@ app.post("/api/credits/shopify-order", async (req, res) => {
     });
   }
 });
+// =========================
+// Mina credits store (in-memory)
+// =========================
+const customerCredits = new Map();
 
+function getCredits(customerId) {
+  const rec = customerCredits.get(String(customerId));
+  return rec?.balance || 0;
+}
+
+function addCredits(customerId, amount, reason = "") {
+  const id = String(customerId);
+  const current = customerCredits.get(id) || { balance: 0, history: [] };
+  const newBalance = current.balance + Number(amount);
+
+  const entry = {
+    ts: Date.now(),
+    delta: Number(amount),
+    reason,
+  };
+
+  const updated = {
+    balance: newBalance,
+    history: [...current.history, entry],
+  };
+
+  customerCredits.set(id, updated);
+  console.log(`[CREDITS] Added ${amount} to ${id}. New balance: ${newBalance}. Reason: ${reason}`);
+  return updated;
+}
+
+function deductCredits(customerId, amount, reason = "") {
+  const id = String(customerId);
+  const current = customerCredits.get(id) || { balance: 0, history: [] };
+  const required = Number(amount);
+
+  if (current.balance < required) {
+    const msg = `[CREDITS] Not enough credits for ${id}. Has ${current.balance}, needs ${required}`;
+    console.warn(msg);
+    const err = new Error("INSUFFICIENT_CREDITS");
+    err.code = "INSUFFICIENT_CREDITS";
+    throw err;
+  }
+
+  const newBalance = current.balance - required;
+  const entry = {
+    ts: Date.now(),
+    delta: -required,
+    reason,
+  };
+
+  const updated = {
+    balance: newBalance,
+    history: [...current.history, entry],
+  };
+
+  customerCredits.set(id, updated);
+  console.log(`[CREDITS] Deducted ${required} from ${id}. New balance: ${newBalance}. Reason: ${reason}`);
+  return updated;
+}
+// =========================
+// Credit product SKUs
+// =========================
+const CREDIT_SKUS = {
+  "MINA-50": 50,  // Mina 50 Machta
+  // later: "MINA-200": 200, etc.
+};
+// =========================
+// Shopify order webhook
+// =========================
+app.post("/api/credits/shopify-order", async (req, res) => {
+  try {
+    const secretFromQuery = req.query.secret;
+    if (!secretFromQuery || secretFromQuery !== process.env.SHOPIFY_ORDER_WEBHOOK_SECRET) {
+      return res.status(401).json({
+        ok: false,
+        error: "UNAUTHORIZED",
+        message: "Invalid webhook secret",
+      });
+    }
+
+    const order = req.body;
+    if (!order) {
+      return res.status(400).json({
+        ok: false,
+        error: "NO_ORDER",
+        message: "Missing order payload",
+      });
+    }
+
+    if (!order.customer || !order.customer.id) {
+      return res.status(400).json({
+        ok: false,
+        error: "NO_CUSTOMER",
+        message: "Order has no customer.id",
+      });
+    }
+
+    const customerId = String(order.customer.id);
+
+    let creditsToAdd = 0;
+    const items = order.line_items || [];
+
+    for (const item of items) {
+      const sku = item.sku;
+      const quantity = item.quantity || 1;
+
+      if (sku && CREDIT_SKUS[sku]) {
+        const perUnit = CREDIT_SKUS[sku];
+        const totalForItem = perUnit * quantity;
+        creditsToAdd += totalForItem;
+      }
+    }
+
+    if (creditsToAdd <= 0) {
+      console.log("[SHOPIFY_WEBHOOK] Order has no credit SKUs. Doing nothing.");
+      return res.json({
+        ok: true,
+        message: "No credit products found in order.",
+        added: 0,
+      });
+    }
+
+    const updated = addCredits(customerId, creditsToAdd, `shopify-order:${order.id || "unknown"}`);
+
+    return res.json({
+      ok: true,
+      message: "Credits added from Shopify order.",
+      customerId,
+      added: creditsToAdd,
+      balance: updated.balance,
+    });
+  } catch (err) {
+    console.error("Error in /api/credits/shopify-order:", err);
+    return res.status(500).json({
+      ok: false,
+      error: "INTERNAL_ERROR",
+      message: "Failed to process Shopify order webhook",
+    });
+  }
+});
+
+// =======================
+//debug endpoint
+// =======================
+
+app.get("/api/credits/:customerId", (req, res) => {
+  const customerId = req.params.customerId;
+  const balance = getCredits(customerId);
+  return res.json({ ok: true, customerId, balance });
+});
 
 // =======================
 // Start server
