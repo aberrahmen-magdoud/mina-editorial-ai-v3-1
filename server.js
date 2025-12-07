@@ -1521,6 +1521,19 @@ app.get("/api/credits/:customerId", (req, res) => {
   const balance = getCredits(customerId);
   return res.json({ ok: true, customerId, balance });
 });
+// =========================
+// PART C – Credit product SKUs
+// =========================
+
+/**
+ * Map of SKU -> credits per unit.
+ * Example: "MINA-50-MACHTA" gives 50 credits per quantity 1.
+ */
+const CREDIT_SKUS = {
+  "MINA-50-MACHTA": 50,
+  // later you can add e.g. "MINA-200-MACHTA": 200
+};
+
 
 // =======================
 // Start server
