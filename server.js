@@ -29,20 +29,84 @@ const SEADREAM_MODEL =
 const KLING_MODEL =
   process.env.KLING_MODEL_VERSION || "kwaivgi/kling-v2.1";
 
-// In-memory "likes" per customer
-// key = customerId (string)
-// value = array of { resultType, platform, prompt, comment, imageUrl?, videoUrl?, createdAt }
-const likeMemory = new Map();
+// =======================
+// PART 2 – Style presets
+// =======================
+
+const STYLE_PRESETS = {
+  "soft-desert-editorial": {
+    name: "Soft Desert Editorial",
+    profile: {
+      keywords: [
+        "warm-sand-tones",
+        "soft-shadows",
+        "minimal-backdrop",
+        "hazy-light",
+        "tactile-textures"
+      ],
+      description:
+        "Soft beige and sand-inspired tones, minimal props, hazy sunlight and gentle shadows. Feels calm, warm and tactile, like a quiet desert morning."
+    },
+    heroImageUrls: [
+      "https://cdn.example.com/mina/styles/soft-desert-1.jpg"
+    ]
+  },
+  "chrome-neon-night": {
+    name: "Chrome Neon Night",
+    profile: {
+      keywords: [
+        "neon-rim-light",
+        "high-contrast",
+        "dark-background",
+        "chrome-reflections",
+        "futuristic"
+      ],
+      description:
+        "Dark environments with strong neon rim lights and chrome reflections. High contrast, sharp edges and a futuristic, night-city atmosphere."
+    },
+    heroImageUrls: [
+      "https://cdn.example.com/mina/styles/chrome-neon-1.jpg"
+    ]
+  },
+  "bathroom-ritual": {
+    name: "Bathroom Ritual",
+    profile: {
+      keywords: [
+        "marble-surfaces",
+        "soft-bathroom-light",
+        "steam-mist",
+        "care-ritual",
+        "intimate-closeups"
+      ],
+      description:
+        "Clean marble surfaces, soft bathroom lighting, hints of steam and water. Intimate close-ups that feel like a self-care ritual moment."
+    },
+    heroImageUrls: [
+      "https://cdn.example.com/mina/styles/bathroom-ritual-1.jpg"
+    ]
+  }
+  // Add more presets later.
+};
+
+// =======================
+// PART 3 – In-memory “DB”
+// =======================
+
+// In-memory likes per customer (for Vision Intelligence)
+const likeMemory = new Map(); // customerId -> [likeEntry]
 const MAX_LIKES_PER_CUSTOMER = 50;
 
-// Style profile cache & history per customer
-// We compute a style profile after MIN_LIKES_FOR_FIRST_PROFILE likes,
-// then refresh every LIKES_PER_PROFILE_REFRESH new likes.
-const styleProfileCache = new Map();   // key: customerId -> { profile, likesCountAtCompute, updatedAt }
-const styleProfileHistory = new Map(); // key: customerId -> [ { profile, likesCountAtCompute, createdAt } ]
+// Style profile cache & history
+const styleProfileCache = new Map();   // customerId -> { profile, likesCountAtCompute, updatedAt }
+const styleProfileHistory = new Map(); // customerId -> [ { profile, likesCountAtCompute, createdAt } ]
 
 const MIN_LIKES_FOR_FIRST_PROFILE = 20;
 const LIKES_PER_PROFILE_REFRESH = 5;
+
+// In-memory sessions & generations & feedback (replace with real DB later)
+const sessions = new Map();     // sessionId -> { id, customerId, platform, title, createdAt }
+const generations = new Map();  // generationId -> { id, type, sessionId, customerId, platform, prompt, outputUrl, createdAt, meta }
+const feedbacks = new Map();    // feedbackId -> { id, sessionId, generationId, ... }
 
 // ---------------- Helpers ----------------
 function safeString(value, fallback = "") {
@@ -80,7 +144,6 @@ function getLikes(customerIdRaw) {
   return likeMemory.get(customerId) || [];
 }
 
-// Style history used for GPT context (list of liked prompts/comments)
 function getStyleHistory(customerIdRaw) {
   const likes = getLikes(customerIdRaw);
   return likes.map((like) => ({
@@ -90,9 +153,106 @@ function getStyleHistory(customerIdRaw) {
   }));
 }
 
-// Build style profile (keywords + description) from likes, with vision on images
+function mergePresetAndUserProfile(presetProfile, userProfile) {
+  if (presetProfile && userProfile) {
+    const combinedKeywords = [
+      ...(presetProfile.keywords || []),
+      ...(userProfile.keywords || []),
+    ]
+      .map((k) => String(k).trim())
+      .filter(Boolean);
+    const dedupedKeywords = Array.from(new Set(combinedKeywords));
+
+    const description = (
+      "Base style: " +
+      (presetProfile.description || "") +
+      " Personal twist: " +
+      (userProfile.description || "")
+    ).trim();
+
+    return {
+      profile: {
+        keywords: dedupedKeywords,
+        description,
+      },
+      source: "preset+user",
+    };
+  } else if (userProfile) {
+    return { profile: userProfile, source: "user_only" };
+  } else if (presetProfile) {
+    return { profile: presetProfile, source: "preset_only" };
+  } else {
+    return { profile: null, source: "none" };
+  }
+}
+
+// Create or get a session (in-memory)
+function createSession({ customerId, platform, title }) {
+  const sessionId = `sess_${uuidv4()}`;
+  const session = {
+    id: sessionId,
+    customerId,
+    platform,
+    title,
+    createdAt: new Date().toISOString(),
+  };
+  sessions.set(sessionId, session);
+  return session;
+}
+
+function ensureSession(sessionIdRaw, customerId, platform) {
+  const platformNorm = safeString(platform || "tiktok").toLowerCase();
+  const incomingId = safeString(sessionIdRaw || "");
+  if (incomingId && sessions.has(incomingId)) {
+    return sessions.get(incomingId);
+  }
+  // Auto-create if missing
+  return createSession({
+    customerId,
+    platform: platformNorm,
+    title: "Mina session",
+  });
+}
+
+// =======================
+// PART 4 – Style profiles via GPT
+// =======================
+
+async function runChatWithFallback({ systemMessage, userContent, fallbackPrompt }) {
+  try {
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4.1-mini",
+      messages: [
+        systemMessage,
+        {
+          role: "user",
+          content: userContent,
+        },
+      ],
+      temperature: 0.8,
+      max_tokens: 280,
+    });
+
+    const prompt = completion.choices?.[0]?.message?.content?.trim();
+    if (!prompt) throw new Error("Empty GPT response");
+
+    return { prompt, usedFallback: false, gptError: null };
+  } catch (err) {
+    console.error("OpenAI error, falling back:", err?.status, err?.message);
+    return {
+      prompt: fallbackPrompt,
+      usedFallback: true,
+      gptError: {
+        status: err?.status || null,
+        message: err?.message || String(err),
+      },
+    };
+  }
+}
+
+// Build style profile from likes, with vision on liked images
 async function buildStyleProfileFromLikes(customerId, likes) {
-  const recentLikes = likes.slice(-10); // only last 10 liked generations
+  const recentLikes = likes.slice(-10);
   if (!recentLikes.length) {
     return {
       profile: { keywords: [], description: "" },
@@ -115,29 +275,24 @@ HasVideo: ${like.videoUrl ? "yes" : "no"}`;
     role: "system",
     content:
       "You are an assistant that summarizes a user's aesthetic preferences " +
-      "for AI-generated editorial product images and motion. " +
-      "You will see some liked generations. For each one you may see:\n" +
-      "- result type (image or motion)\n" +
-      "- platform\n" +
-      "- the generation prompt\n" +
-      "- an optional user comment describing what they liked or disliked\n" +
-      "- sometimes the final liked image itself\n\n" +
+      "for AI-generated editorial product images and motion.\n\n" +
+      "You will see liked generations with prompts, optional comments, and sometimes the final liked image.\n\n" +
       "IMPORTANT:\n" +
       "- Treat comments as preference signals. If user says they DON'T like something (e.g. 'I like the image but I don't like the light'), do NOT treat that attribute as part of their style. Prefer avoiding repeatedly disliked attributes.\n" +
       "- For images, use the actual image content (colors, lighting, composition, background complexity, mood) to infer style.\n" +
-      "- For motion entries, you will not see video, only prompts/comments. Use those.\n\n" +
-      "Your task is to infer the consistent positive style across these examples.\n" +
-      "Return strict JSON only with short keywords and a style description.",
+      "- For motion entries you only see prompts/comments, use those.\n\n" +
+      "Return STRICT JSON only with 'keywords' and 'description'.",
   };
 
   const userText = `
 Customer id: ${customerId}
+
 Below are image/video generations this customer explicitly liked.
 
 Infer what they CONSISTENTLY LIKE, not what they dislike.
 If comments mention dislikes, subtract those from your style interpretation.
 
-Return STRICT JSON only, no prose, with this shape:
+Return STRICT JSON only with this shape:
 {
   "keywords": ["short-tag-1", "short-tag-2", ...],
   "description": "2-3 sentence natural-language description of their style"
@@ -147,7 +302,6 @@ Text data for last liked generations:
 ${examplesText}
 `.trim();
 
-  // Build vision content from liked images (images only, not videos)
   const imageParts = [];
   recentLikes.forEach((like) => {
     if (like.resultType === "image" && like.imageUrl) {
@@ -196,7 +350,6 @@ ${examplesText}
   };
 }
 
-// Get or build cached style profile with thresholds & caching
 async function getOrBuildStyleProfile(customerIdRaw, likes) {
   const customerId = String(customerIdRaw || "anonymous");
   const likesCount = likes.length;
@@ -230,7 +383,6 @@ async function getOrBuildStyleProfile(customerIdRaw, likes) {
     };
   }
 
-  // Recompute profile from likes
   const profileRes = await buildStyleProfileFromLikes(customerId, likes);
   const profile = profileRes.profile;
   const updatedAt = new Date().toISOString();
@@ -241,7 +393,6 @@ async function getOrBuildStyleProfile(customerIdRaw, likes) {
     updatedAt,
   });
 
-  // Append to styleProfileHistory log
   const historyArr = styleProfileHistory.get(customerId) || [];
   historyArr.push({
     profile,
@@ -264,52 +415,10 @@ async function getOrBuildStyleProfile(customerIdRaw, likes) {
   };
 }
 
-// Simple health check
-app.get("/health", (req, res) => {
-  res.json({
-    ok: true,
-    service: "Mina Editorial AI API",
-    time: new Date().toISOString(),
-  });
-});
-
 // =======================
-// PART 2 – GPT helpers (vision + style memory)
+// PART 5 – Prompt builders
 // =======================
 
-async function runChatWithFallback({ systemMessage, userContent, fallbackPrompt }) {
-  try {
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4.1-mini",
-      messages: [
-        systemMessage,
-        {
-          role: "user",
-          content: userContent, // string OR [{type:'text'},{type:'image_url'},...]
-        },
-      ],
-      temperature: 0.8,
-      max_tokens: 280,
-    });
-
-    const prompt = completion.choices?.[0]?.message?.content?.trim();
-    if (!prompt) throw new Error("Empty GPT response");
-
-    return { prompt, usedFallback: false, gptError: null };
-  } catch (err) {
-    console.error("OpenAI error, falling back:", err?.status, err?.message);
-    return {
-      prompt: fallbackPrompt,
-      usedFallback: true,
-      gptError: {
-        status: err?.status || null,
-        message: err?.message || String(err),
-      },
-    };
-  }
-}
-
-// ---- Build Mina's SeaDream prompt (image) with vision + likes ----
 async function buildEditorialPrompt(payload) {
   const {
     productImageUrl,
@@ -320,6 +429,7 @@ async function buildEditorialPrompt(payload) {
     mode = "image",
     styleHistory = [],
     styleProfile = null,
+    presetHeroImageUrls = [],
   } = payload;
 
   const fallbackPrompt = [
@@ -356,9 +466,8 @@ async function buildEditorialPrompt(payload) {
     role: "system",
     content:
       "You are Mina, an editorial art director for fashion & beauty. " +
-      "You will see one product image and up to 3 style reference images. " +
+      "You will see one product image and up to several style reference images. " +
       "You write ONE clear prompt for a generative image model. " +
-      "The model only understands English descriptions, not URLs. " +
       "Describe subject, environment, lighting, camera, mood, and style. " +
       "Do NOT include line breaks, lists, or bullet points. One paragraph max.",
   };
@@ -375,18 +484,18 @@ Target platform: ${platform}
 Recent liked prompts for this customer (history):
 ${historyText}
 
-Customer style profile inferred from liked generations:
+Combined style profile (from presets and/or user-liked generations):
 Keywords: ${profileKeywords || "none"}
 Description: ${profileDescription}
 
 The attached images are:
 - Main product image as the hero subject
-- Up to 3 style/mood references for lighting, color, and composition
+- Up to 3 style/mood references from the user
+- Optional preset hero style image(s) defining a strong mood/look
 
 Write the final prompt I should send to the image model.
 `.trim();
 
-  // Vision content: product + style refs
   const imageParts = [];
   if (productImageUrl) {
     imageParts.push({
@@ -396,6 +505,16 @@ Write the final prompt I should send to the image model.
   }
   (styleImageUrls || [])
     .slice(0, 3)
+    .filter((url) => !!url)
+    .forEach((url) => {
+      imageParts.push({
+        type: "image_url",
+        image_url: { url },
+      });
+    });
+
+  (presetHeroImageUrls || [])
+    .slice(0, 1)
     .filter((url) => !!url)
     .forEach((url) => {
       imageParts.push({
@@ -422,7 +541,7 @@ Write the final prompt I should send to the image model.
   });
 }
 
-// ---- Build Mina's Kling prompt (motion) with vision + likes ----
+// Motion prompt for Kling (used only when generating video)
 async function buildMotionPrompt(options) {
   const {
     motionBrief,
@@ -484,7 +603,7 @@ Target platform: ${platform}
 Recent liked image prompts for this customer (aesthetic history):
 ${historyText}
 
-Customer style profile inferred from liked generations:
+Combined style profile (from presets and/or user-liked generations):
 Keywords: ${profileKeywords || "none"}
 Description: ${profileDescription}
 
@@ -518,9 +637,139 @@ Write the final video generation prompt.
   });
 }
 
+// Motion idea suggestion for the textarea (1 sentence)
+async function buildMotionSuggestion(options) {
+  const {
+    referenceImageUrl,
+    tone,
+    platform = "tiktok",
+    styleHistory = [],
+    styleProfile = null,
+  } = options;
+
+  const fallbackPrompt =
+    "Slow, minimal editorial motion with a gentle camera drift and soft ASMR-like movement of light or props.";
+
+  const historyText = styleHistory.length
+    ? styleHistory
+        .map(
+          (item, idx) =>
+            `${idx + 1}) [${item.platform}] ${item.prompt || ""}`
+        )
+        .join("\n")
+    : "none";
+
+  const profileDescription =
+    styleProfile && styleProfile.description
+      ? styleProfile.description
+      : "no explicit style profile yet.";
+  const profileKeywords =
+    styleProfile && Array.isArray(styleProfile.keywords)
+      ? styleProfile.keywords.join(", ")
+      : "";
+
+  const systemMessage = {
+    role: "system",
+    content:
+      "You are Mina, an editorial motion director for luxury still-life. " +
+      "Given a reference image and style preferences, propose ONE short motion idea the user will see in a textarea. " +
+      "The motion should feel editorial, minimal, ASMR-like: think subtle camera moves, soft breeze, melting, slow drips, gentle shadows.\n\n" +
+      "Constraints:\n" +
+      "- Return exactly ONE sentence, no bullet points, no quotes.\n" +
+      "- Max ~220 characters.\n" +
+      "- Do NOT mention 'TikTok' or 'platform', just describe the motion.",
+  };
+
+  const userText = `
+We want a motion idea for an editorial product shot.
+
+Tone / feeling: ${safeString(tone, "not specified")}
+Target platform: ${platform}
+
+Recent liked prompts for this customer:
+${historyText}
+
+Style profile:
+Keywords: ${profileKeywords || "none"}
+Description: ${profileDescription}
+
+The attached image is the still to animate. Propose one natural-language motion idea sentence.
+`.trim();
+
+  const imageParts = [];
+  if (referenceImageUrl) {
+    imageParts.push({
+      type: "image_url",
+      image_url: { url: referenceImageUrl },
+    });
+  }
+
+  const userContent =
+    imageParts.length > 0
+      ? [
+          {
+            type: "text",
+            text: userText,
+          },
+          ...imageParts,
+        ]
+      : userText;
+
+  const result = await runChatWithFallback({
+    systemMessage,
+    userContent,
+    fallbackPrompt,
+  });
+
+  return {
+    text: result.prompt,
+    usedFallback: result.usedFallback,
+    gptError: result.gptError,
+  };
+}
+
 // =======================
-// PART 3 – API routes
+// PART 6 – Routes
 // =======================
+
+// Health
+app.get("/health", (req, res) => {
+  res.json({
+    ok: true,
+    service: "Mina Editorial AI API",
+    time: new Date().toISOString(),
+  });
+});
+
+// ---- Session start ----
+app.post("/sessions/start", (req, res) => {
+  const requestId = `req_${Date.now()}_${uuidv4()}`;
+  try {
+    const body = req.body || {};
+    const customerId =
+      body.customerId !== null && body.customerId !== undefined
+        ? String(body.customerId)
+        : "anonymous";
+    const platform = safeString(body.platform || "tiktok").toLowerCase();
+    const title = safeString(body.title || "Mina session");
+
+    const session = createSession({ customerId, platform, title });
+
+    res.json({
+      ok: true,
+      requestId,
+      session,
+    });
+  } catch (err) {
+    console.error("Error in /sessions/start:", err);
+    res.status(500).json({
+      ok: false,
+      error: "SESSION_ERROR",
+      message: err?.message || "Unexpected error during session start.",
+      requestId,
+    });
+  }
+});
 
 // ---- Mina Editorial (image) ----
 app.post("/editorial/generate", async (req, res) => {
@@ -536,6 +785,9 @@ app.post("/editorial/generate", async (req, res) => {
     const tone = safeString(body.tone);
     const platform = safeString(body.platform || "tiktok").toLowerCase();
     const minaVisionEnabled = !!body.minaVisionEnabled;
+    const stylePresetKey = safeString(body.stylePresetKey || "");
+    const preset = stylePresetKey ? STYLE_PRESETS[stylePresetKey] || null : null;
+
     const customerId =
       body.customerId !== null && body.customerId !== undefined
         ? String(body.customerId)
@@ -551,16 +803,43 @@ app.post("/editorial/generate", async (req, res) => {
       });
     }
 
+    // Session
+    const session = ensureSession(body.sessionId, customerId, platform);
+    const sessionId = session.id;
+
     let styleHistory = [];
-    let styleProfile = null;
+    let userStyleProfile = null;
+    let finalStyleProfile = null;
     let styleProfileMeta = null;
 
     if (minaVisionEnabled && customerId) {
       const likes = getLikes(customerId);
       styleHistory = getStyleHistory(customerId);
       const profileRes = await getOrBuildStyleProfile(customerId, likes);
-      styleProfile = profileRes.profile;
-      styleProfileMeta = profileRes.meta;
+      userStyleProfile = profileRes.profile;
+
+      const merged = mergePresetAndUserProfile(
+        preset ? preset.profile : null,
+        userStyleProfile
+      );
+      finalStyleProfile = merged.profile;
+      styleProfileMeta = {
+        ...profileRes.meta,
+        presetKey: stylePresetKey || null,
+        mergeSource: merged.source,
+      };
+    } else {
+      styleHistory = [];
+      const merged = mergePresetAndUserProfile(
+        preset ? preset.profile : null,
+        null
+      );
+      finalStyleProfile = merged.profile;
+      styleProfileMeta = {
+        source: merged.source,
+        likesCount: 0,
+        presetKey: stylePresetKey || null,
+      };
     }
 
     const promptResult = await buildEditorialPrompt({
@@ -571,7 +850,8 @@ app.post("/editorial/generate", async (req, res) => {
       platform,
       mode: "image",
       styleHistory,
-      styleProfile,
+      styleProfile: finalStyleProfile,
+      presetHeroImageUrls: preset?.heroImageUrls || [],
     });
 
     const prompt = promptResult.prompt;
@@ -598,7 +878,6 @@ app.post("/editorial/generate", async (req, res) => {
 
     const output = await replicate.run(SEADREAM_MODEL, { input });
 
-    // Normalise SeaDream output to list of URLs
     let imageUrls = [];
     if (Array.isArray(output)) {
       imageUrls = output
@@ -619,19 +898,41 @@ app.post("/editorial/generate", async (req, res) => {
       }
     }
 
+    const imageUrl = imageUrls[0] || null;
+
+    // Store generation in in-memory DB
+    const generationId = `gen_${uuidv4()}`;
+    generations.set(generationId, {
+      id: generationId,
+      type: "image",
+      sessionId,
+      customerId,
+      platform,
+      prompt,
+      outputUrl: imageUrl,
+      createdAt: new Date().toISOString(),
+      meta: {
+        mode: "image",
+        minaVisionEnabled,
+        stylePresetKey,
+      },
+    });
+
     res.json({
       ok: true,
       message: "Mina Editorial image generated via SeaDream.",
       requestId,
       prompt,
-      imageUrl: imageUrls[0] || null,
+      imageUrl,
       imageUrls,
       rawOutput: output,
       payload: body,
+      generationId,
+      sessionId,
       gpt: {
         usedFallback: promptResult.usedFallback,
         error: promptResult.gptError,
-        styleProfile,
+        styleProfile: finalStyleProfile,
         styleProfileMeta,
       },
     });
@@ -641,6 +942,82 @@ app.post("/editorial/generate", async (req, res) => {
       ok: false,
       error: "EDITORIAL_GENERATION_ERROR",
       message: err?.message || "Unexpected error during image generation.",
+      requestId,
+    });
+  }
+});
+
+// ---- Motion suggestion (for textarea) ----
+app.post("/motion/suggest", async (req, res) => {
+  const requestId = `req_${Date.now()}_${uuidv4()}`;
+
+  try {
+    const body = req.body || {};
+    const referenceImageUrl = safeString(body.referenceImageUrl);
+    if (!referenceImageUrl) {
+      return res.status(400).json({
+        ok: false,
+        error: "MISSING_REFERENCE_IMAGE",
+        message: "referenceImageUrl is required to suggest motion.",
+        requestId,
+      });
+    }
+
+    const tone = safeString(body.tone);
+    const platform = safeString(body.platform || "tiktok").toLowerCase();
+    const minaVisionEnabled = !!body.minaVisionEnabled;
+    const stylePresetKey = safeString(body.stylePresetKey || "");
+    const preset = stylePresetKey ? STYLE_PRESETS[stylePresetKey] || null : null;
+
+    const customerId =
+      body.customerId !== null && body.customerId !== undefined
+        ? String(body.customerId)
+        : "anonymous";
+
+    let styleHistory = [];
+    let userStyleProfile = null;
+    let finalStyleProfile = null;
+
+    if (minaVisionEnabled && customerId) {
+      const likes = getLikes(customerId);
+      styleHistory = getStyleHistory(customerId);
+      const profileRes = await getOrBuildStyleProfile(customerId, likes);
+      userStyleProfile = profileRes.profile;
+      finalStyleProfile = mergePresetAndUserProfile(
+        preset ? preset.profile : null,
+        userStyleProfile
+      ).profile;
+    } else {
+      styleHistory = [];
+      finalStyleProfile = mergePresetAndUserProfile(
+        preset ? preset.profile : null,
+        null
+      ).profile;
+    }
+
+    const suggestionRes = await buildMotionSuggestion({
+      referenceImageUrl,
+      tone,
+      platform,
+      styleHistory,
+      styleProfile: finalStyleProfile,
+    });
+
+    res.json({
+      ok: true,
+      requestId,
+      suggestion: suggestionRes.text,
+      gpt: {
+        usedFallback: suggestionRes.usedFallback,
+        error: suggestionRes.gptError,
+      },
+    });
+  } catch (err) {
+    console.error("Error in /motion/suggest:", err);
+    res.status(500).json({
+      ok: false,
+      error: "MOTION_SUGGESTION_ERROR",
+      message: err?.message || "Unexpected error during motion suggestion.",
       requestId,
     });
   }
@@ -657,6 +1034,9 @@ app.post("/motion/generate", async (req, res) => {
     const tone = safeString(body.tone);
     const platform = safeString(body.platform || "tiktok").toLowerCase();
     const minaVisionEnabled = !!body.minaVisionEnabled;
+    const stylePresetKey = safeString(body.stylePresetKey || "");
+    const preset = stylePresetKey ? STYLE_PRESETS[stylePresetKey] || null : null;
+
     const customerId =
       body.customerId !== null && body.customerId !== undefined
         ? String(body.customerId)
@@ -680,16 +1060,43 @@ app.post("/motion/generate", async (req, res) => {
       });
     }
 
+    // Session
+    const session = ensureSession(body.sessionId, customerId, platform);
+    const sessionId = session.id;
+
     let styleHistory = [];
-    let styleProfile = null;
+    let userStyleProfile = null;
+    let finalStyleProfile = null;
     let styleProfileMeta = null;
 
     if (minaVisionEnabled && customerId) {
       const likes = getLikes(customerId);
       styleHistory = getStyleHistory(customerId);
       const profileRes = await getOrBuildStyleProfile(customerId, likes);
-      styleProfile = profileRes.profile;
-      styleProfileMeta = profileRes.meta;
+      userStyleProfile = profileRes.profile;
+
+      const merged = mergePresetAndUserProfile(
+        preset ? preset.profile : null,
+        userStyleProfile
+      );
+      finalStyleProfile = merged.profile;
+      styleProfileMeta = {
+        ...profileRes.meta,
+        presetKey: stylePresetKey || null,
+        mergeSource: merged.source,
+      };
+    } else {
+      styleHistory = [];
+      const merged = mergePresetAndUserProfile(
+        preset ? preset.profile : null,
+        null
+      );
+      finalStyleProfile = merged.profile;
+      styleProfileMeta = {
+        source: merged.source,
+        likesCount: 0,
+        presetKey: stylePresetKey || null,
+      };
     }
 
     const motionResult = await buildMotionPrompt({
@@ -698,11 +1105,13 @@ app.post("/motion/generate", async (req, res) => {
       platform,
       lastImageUrl,
       styleHistory,
-      styleProfile,
+      styleProfile: finalStyleProfile,
     });
 
     const prompt = motionResult.prompt;
-    const durationSeconds = Number(body.durationSeconds || 5);
+    let durationSeconds = Number(body.durationSeconds || 5);
+    if (durationSeconds > 10) durationSeconds = 10;
+    if (durationSeconds < 1) durationSeconds = 1;
 
     const input = {
       mode: "standard",
@@ -714,7 +1123,6 @@ app.post("/motion/generate", async (req, res) => {
 
     const output = await replicate.run(KLING_MODEL, { input });
 
-    // Normalise Kling output to a single video URL
     let videoUrl = null;
     if (typeof output === "string") {
       videoUrl = output;
@@ -736,6 +1144,24 @@ app.post("/motion/generate", async (req, res) => {
       }
     }
 
+    const generationId = `gen_${uuidv4()}`;
+    generations.set(generationId, {
+      id: generationId,
+      type: "motion",
+      sessionId,
+      customerId,
+      platform,
+      prompt,
+      outputUrl: videoUrl,
+      createdAt: new Date().toISOString(),
+      meta: {
+        mode: "motion",
+        minaVisionEnabled,
+        stylePresetKey,
+        durationSeconds,
+      },
+    });
+
     res.json({
       ok: true,
       message: "Mina Motion video generated via Kling.",
@@ -743,6 +1169,8 @@ app.post("/motion/generate", async (req, res) => {
       prompt,
       videoUrl,
       rawOutput: output,
+      generationId,
+      sessionId,
       payload: {
         lastImageUrl,
         motionDescription,
@@ -750,11 +1178,12 @@ app.post("/motion/generate", async (req, res) => {
         platform,
         durationSeconds,
         customerId,
+        stylePresetKey,
       },
       gpt: {
         usedFallback: motionResult.usedFallback,
         error: motionResult.gptError,
-        styleProfile,
+        styleProfile: finalStyleProfile,
         styleProfileMeta,
       },
     });
@@ -769,7 +1198,7 @@ app.post("/motion/generate", async (req, res) => {
   }
 });
 
-// ---- Mina Vision feedback (likes) ----
+// ---- Feedback / likes (image + motion) ----
 app.post("/feedback/like", (req, res) => {
   const requestId = `req_${Date.now()}_${uuidv4()}`;
 
@@ -785,6 +1214,8 @@ app.post("/feedback/like", (req, res) => {
     const comment = safeString(body.comment);
     const imageUrl = safeString(body.imageUrl || "");
     const videoUrl = safeString(body.videoUrl || "");
+    const sessionId = safeString(body.sessionId || "");
+    const generationId = safeString(body.generationId || "");
 
     if (!prompt) {
       return res.status(400).json({
@@ -795,6 +1226,7 @@ app.post("/feedback/like", (req, res) => {
       });
     }
 
+    // Save in Vision memory
     rememberLike(customerId, {
       resultType,
       platform,
@@ -802,6 +1234,22 @@ app.post("/feedback/like", (req, res) => {
       comment,
       imageUrl: imageUrl || null,
       videoUrl: videoUrl || null,
+    });
+
+    // Save feedback in in-memory DB
+    const feedbackId = `fb_${uuidv4()}`;
+    feedbacks.set(feedbackId, {
+      id: feedbackId,
+      sessionId: sessionId || null,
+      generationId: generationId || null,
+      customerId,
+      resultType,
+      platform,
+      prompt,
+      comment,
+      imageUrl: imageUrl || null,
+      videoUrl: videoUrl || null,
+      createdAt: new Date().toISOString(),
     });
 
     const totalLikes = getLikes(customerId).length;
@@ -814,6 +1262,8 @@ app.post("/feedback/like", (req, res) => {
         customerId,
         resultType,
         platform,
+        sessionId: sessionId || null,
+        generationId: generationId || null,
       },
       totals: {
         likesForCustomer: totalLikes,
