@@ -1512,6 +1512,15 @@ app.post("/api/credits/shopify-topup", async (req, res) => {
     });
   }
 });
+// =========================
+// PART B – Debug endpoint to see credits
+// =========================
+
+app.get("/api/credits/:customerId", (req, res) => {
+  const customerId = req.params.customerId;
+  const balance = getCredits(customerId);
+  return res.json({ ok: true, customerId, balance });
+});
 
 // =======================
 // Start server
