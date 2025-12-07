@@ -42,14 +42,12 @@ const STYLE_PRESETS = {
         "soft-shadows",
         "minimal-backdrop",
         "hazy-light",
-        "tactile-textures"
+        "tactile-textures",
       ],
       description:
-        "Soft beige and sand-inspired tones, minimal props, hazy sunlight and gentle shadows. Feels calm, warm and tactile, like a quiet desert morning."
+        "Soft beige and sand-inspired tones, minimal props, hazy sunlight and gentle shadows. Feels calm, warm and tactile, like a quiet desert morning.",
     },
-    heroImageUrls: [
-      "https://cdn.example.com/mina/styles/soft-desert-1.jpg"
-    ]
+    heroImageUrls: ["https://cdn.example.com/mina/styles/soft-desert-1.jpg"],
   },
   "chrome-neon-night": {
     name: "Chrome Neon Night",
@@ -59,14 +57,12 @@ const STYLE_PRESETS = {
         "high-contrast",
         "dark-background",
         "chrome-reflections",
-        "futuristic"
+        "futuristic",
       ],
       description:
-        "Dark environments with strong neon rim lights and chrome reflections. High contrast, sharp edges and a futuristic, night-city atmosphere."
+        "Dark environments with strong neon rim lights and chrome reflections. High contrast, sharp edges and a futuristic, night-city atmosphere.",
     },
-    heroImageUrls: [
-      "https://cdn.example.com/mina/styles/chrome-neon-1.jpg"
-    ]
+    heroImageUrls: ["https://cdn.example.com/mina/styles/chrome-neon-1.jpg"],
   },
   "bathroom-ritual": {
     name: "Bathroom Ritual",
@@ -76,15 +72,13 @@ const STYLE_PRESETS = {
         "soft-bathroom-light",
         "steam-mist",
         "care-ritual",
-        "intimate-closeups"
+        "intimate-closeups",
       ],
       description:
-        "Clean marble surfaces, soft bathroom lighting, hints of steam and water. Intimate close-ups that feel like a self-care ritual moment."
+        "Clean marble surfaces, soft bathroom lighting, hints of steam and water. Intimate close-ups that feel like a self-care ritual moment.",
     },
-    heroImageUrls: [
-      "https://cdn.example.com/mina/styles/bathroom-ritual-1.jpg"
-    ]
-  }
+    heroImageUrls: ["https://cdn.example.com/mina/styles/bathroom-ritual-1.jpg"],
+  },
   // Add more presets later.
 };
 
@@ -97,16 +91,64 @@ const likeMemory = new Map(); // customerId -> [likeEntry]
 const MAX_LIKES_PER_CUSTOMER = 50;
 
 // Style profile cache & history
-const styleProfileCache = new Map();   // customerId -> { profile, likesCountAtCompute, updatedAt }
+const styleProfileCache = new Map(); // customerId -> { profile, likesCountAtCompute, updatedAt }
 const styleProfileHistory = new Map(); // customerId -> [ { profile, likesCountAtCompute, createdAt } ]
 
 const MIN_LIKES_FOR_FIRST_PROFILE = 20;
 const LIKES_PER_PROFILE_REFRESH = 5;
 
 // In-memory sessions & generations & feedback (replace with real DB later)
-const sessions = new Map();     // sessionId -> { id, customerId, platform, title, createdAt }
-const generations = new Map();  // generationId -> { id, type, sessionId, customerId, platform, prompt, outputUrl, createdAt, meta }
-const feedbacks = new Map();    // feedbackId -> { id, sessionId, generationId, ... }
+const sessions = new Map(); // sessionId -> { id, customerId, platform, title, createdAt }
+const generations = new Map(); // generationId -> { id, type, sessionId, customerId, ... }
+const feedbacks = new Map(); // feedbackId -> { ... }
+
+// =======================
+// PART 3b – Credits / coupons (in-memory)
+// =======================
+
+const credits = new Map(); // customerId -> { balance, history: [{ delta, reason, source, at }] }
+
+// How many credits each operation costs
+const IMAGE_CREDITS_COST = Number(process.env.IMAGE_CREDITS_COST || 1);
+const MOTION_CREDITS_COST = Number(process.env.MOTION_CREDITS_COST || 3);
+
+// Free credits ON FIRST USE, for testing. Set to 0 in production.
+const DEFAULT_FREE_CREDITS = Number(process.env.DEFAULT_FREE_CREDITS || 50);
+
+function getCreditsRecord(customerIdRaw) {
+  const customerId = String(customerIdRaw || "anonymous");
+  let rec = credits.get(customerId);
+  if (!rec) {
+    rec = {
+      balance: 0,
+      history: [],
+    };
+    if (DEFAULT_FREE_CREDITS > 0) {
+      rec.balance = DEFAULT_FREE_CREDITS;
+      rec.history.push({
+        delta: DEFAULT_FREE_CREDITS,
+        reason: "auto-welcome",
+        source: "system",
+        at: new Date().toISOString(),
+      });
+    }
+    credits.set(customerId, rec);
+  }
+  return rec;
+}
+
+function addCreditsInternal(customerIdRaw, delta, reason, source) {
+  const customerId = String(customerIdRaw || "anonymous");
+  const rec = getCreditsRecord(customerId);
+  rec.balance += delta;
+  rec.history.push({
+    delta,
+    reason: reason || "adjustment",
+    source: source || "api",
+    at: new Date().toISOString(),
+  });
+  return rec;
+}
 
 // ---------------- Helpers ----------------
 function safeString(value, fallback = "") {
@@ -206,7 +248,6 @@ function ensureSession(sessionIdRaw, customerId, platform) {
   if (incomingId && sessions.has(incomingId)) {
     return sessions.get(incomingId);
   }
-  // Auto-create if missing
   return createSession({
     customerId,
     platform: platformNorm,
@@ -741,6 +782,76 @@ app.get("/health", (req, res) => {
   });
 });
 
+// ---- Credits: balance ----
+app.get("/credits/balance", (req, res) => {
+  const requestId = `req_${Date.now()}_${uuidv4()}`;
+  try {
+    const customerIdRaw = req.query.customerId || "anonymous";
+    const customerId = String(customerIdRaw);
+    const rec = getCreditsRecord(customerId);
+    res.json({
+      ok: true,
+      requestId,
+      customerId,
+      balance: rec.balance,
+      historyLength: rec.history.length,
+      meta: {
+        imageCost: IMAGE_CREDITS_COST,
+        motionCost: MOTION_CREDITS_COST,
+      },
+    });
+  } catch (err) {
+    console.error("Error in /credits/balance:", err);
+    res.status(500).json({
+      ok: false,
+      error: "CREDITS_ERROR",
+      message: err?.message || "Unexpected error during credits balance.",
+      requestId,
+    });
+  }
+});
+
+// ---- Credits: add (manual / via webhook) ----
+app.post("/credits/add", (req, res) => {
+  const requestId = `req_${Date.now()}_${uuidv4()}`;
+  try {
+    const body = req.body || {};
+    const customerId =
+      body.customerId !== null && body.customerId !== undefined
+        ? String(body.customerId)
+        : "anonymous";
+    const amount = Number(body.amount || 0);
+    const reason = safeString(body.reason || "manual-topup");
+    const source = safeString(body.source || "api");
+
+    if (!amount || !Number.isFinite(amount)) {
+      return res.status(400).json({
+        ok: false,
+        error: "INVALID_AMOUNT",
+        message: "amount is required and must be a number.",
+        requestId,
+      });
+    }
+
+    const rec = addCreditsInternal(customerId, amount, reason, source);
+
+    res.json({
+      ok: true,
+      requestId,
+      customerId,
+      newBalance: rec.balance,
+    });
+  } catch (err) {
+    console.error("Error in /credits/add:", err);
+    res.status(500).json({
+      ok: false,
+      error: "CREDITS_ERROR",
+      message: err?.message || "Unexpected error during credits add.",
+      requestId,
+    });
+  }
+});
+
 // ---- Session start ----
 app.post("/sessions/start", (req, res) => {
   const requestId = `req_${Date.now()}_${uuidv4()}`;
@@ -752,6 +863,9 @@ app.post("/sessions/start", (req, res) => {
         : "anonymous";
     const platform = safeString(body.platform || "tiktok").toLowerCase();
     const title = safeString(body.title || "Mina session");
+
+    // ensure credits record exists for this customer
+    getCreditsRecord(customerId);
 
     const session = createSession({ customerId, platform, title });
 
@@ -799,6 +913,20 @@ app.post("/editorial/generate", async (req, res) => {
         error: "MISSING_INPUT",
         message:
           "Provide at least productImageUrl or brief so Mina knows what to create.",
+        requestId,
+      });
+    }
+
+    // Credits check
+    const creditsRecord = getCreditsRecord(customerId);
+    const imageCost = IMAGE_CREDITS_COST;
+    if (creditsRecord.balance < imageCost) {
+      return res.status(402).json({
+        ok: false,
+        error: "INSUFFICIENT_CREDITS",
+        message: `Not enough Mina credits. Need ${imageCost}, you have ${creditsRecord.balance}.`,
+        requiredCredits: imageCost,
+        currentCredits: creditsRecord.balance,
         requestId,
       });
     }
@@ -900,6 +1028,15 @@ app.post("/editorial/generate", async (req, res) => {
 
     const imageUrl = imageUrls[0] || null;
 
+    // Spend credits AFTER successful generation
+    creditsRecord.balance -= imageCost;
+    creditsRecord.history.push({
+      delta: -imageCost,
+      reason: "editorial-generate",
+      source: "api",
+      at: new Date().toISOString(),
+    });
+
     // Store generation in in-memory DB
     const generationId = `gen_${uuidv4()}`;
     generations.set(generationId, {
@@ -929,6 +1066,10 @@ app.post("/editorial/generate", async (req, res) => {
       payload: body,
       generationId,
       sessionId,
+      credits: {
+        balance: creditsRecord.balance,
+        cost: imageCost,
+      },
       gpt: {
         usedFallback: promptResult.usedFallback,
         error: promptResult.gptError,
@@ -1060,6 +1201,20 @@ app.post("/motion/generate", async (req, res) => {
       });
     }
 
+    // Credits check
+    const creditsRecord = getCreditsRecord(customerId);
+    const motionCost = MOTION_CREDITS_COST;
+    if (creditsRecord.balance < motionCost) {
+      return res.status(402).json({
+        ok: false,
+        error: "INSUFFICIENT_CREDITS",
+        message: `Not enough Mina credits. Need ${motionCost}, you have ${creditsRecord.balance}.`,
+        requiredCredits: motionCost,
+        currentCredits: creditsRecord.balance,
+        requestId,
+      });
+    }
+
     // Session
     const session = ensureSession(body.sessionId, customerId, platform);
     const sessionId = session.id;
@@ -1144,6 +1299,15 @@ app.post("/motion/generate", async (req, res) => {
       }
     }
 
+    // Spend credits AFTER successful generation
+    creditsRecord.balance -= motionCost;
+    creditsRecord.history.push({
+      delta: -motionCost,
+      reason: "motion-generate",
+      source: "api",
+      at: new Date().toISOString(),
+    });
+
     const generationId = `gen_${uuidv4()}`;
     generations.set(generationId, {
       id: generationId,
@@ -1179,6 +1343,10 @@ app.post("/motion/generate", async (req, res) => {
         durationSeconds,
         customerId,
         stylePresetKey,
+      },
+      credits: {
+        balance: creditsRecord.balance,
+        cost: motionCost,
       },
       gpt: {
         usedFallback: motionResult.usedFallback,
