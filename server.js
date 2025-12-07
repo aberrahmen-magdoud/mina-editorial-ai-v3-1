@@ -1455,95 +1455,37 @@ app.post("/feedback/like", (req, res) => {
   }
 });
 // =========================
-// PART 7 – Shopify + Credits integration & debug
+// PART 7 – Shopify credits integration (no Flow)
 // =========================
 
-// Shopify Flow "top up a specific number of credits" webhook (optional)
-app.post("/api/credits/shopify-topup", (req, res) => {
-  const requestId = `req_${Date.now()}_${uuidv4()}`;
-
-  try {
-    const { secret, customerId, credits } = req.body || {};
-
-    // 1) Auth via shared secret
-    if (!secret || secret !== process.env.SHOPIFY_FLOW_WEBHOOK_SECRET) {
-      return res.status(401).json({
-        ok: false,
-        error: "UNAUTHORIZED",
-        message: "Invalid webhook secret",
-        requestId,
-      });
-    }
-
-    // 2) Validate payload
-    if (!customerId || !credits) {
-      return res.status(400).json({
-        ok: false,
-        error: "INVALID_PAYLOAD",
-        message: "customerId and credits are required",
-        requestId,
-      });
-    }
-
-    const numericCredits = Number(credits);
-    if (!Number.isFinite(numericCredits) || numericCredits <= 0) {
-      return res.status(400).json({
-        ok: false,
-        error: "INVALID_CREDITS",
-        message: "credits must be a positive number",
-        requestId,
-      });
-    }
-
-    // 3) Use the main credits helper (from PART 3b)
-    const rec = addCreditsInternal(
-      String(customerId),
-      numericCredits,
-      "shopify-topup",
-      "shopify-flow"
-    );
-
-    return res.json({
-      ok: true,
-      requestId,
-      message: "Credits added from Shopify Flow",
-      customerId: String(customerId),
-      added: numericCredits,
-      balance: rec.balance,
-    });
-  } catch (err) {
-    console.error("Error in /api/credits/shopify-topup:", err);
-    return res.status(500).json({
-      ok: false,
-      error: "INTERNAL_ERROR",
-      message: "Failed to process Shopify top-up webhook",
-      requestId,
-    });
-  }
-});
-
-// Map Shopify SKU -> credits per unit
-// Your pack: MINA-50 = 50 credits
+/**
+ * Map of SKU -> credits per unit.
+ * Example: "MINA-50" gives 50 credits per quantity 1.
+ */
 const CREDIT_SKUS = {
-  "MINA-50": 50,
-  // later you can add more, e.g. "MINA-200": 200
+  "MINA-50": 50, // Mina 50 Machta
+  // later: "MINA-200": 200, etc.
 };
 
-// Shopify "order paid" webhook (no Flow HTTP step needed)
-app.post("/api/credits/shopify-order", (req, res) => {
-  const requestId = `req_${Date.now()}_${uuidv4()}`;
-
+/**
+ * Shopify Admin will POST the full order JSON to:
+ *   /api/credits/shopify-order?secret=YOUR_SECRET
+ *
+ * We:
+ *  - verify the query secret
+ *  - sum credits for any line_items whose sku is in CREDIT_SKUS
+ *  - add those credits to that customerId using the SAME credits store
+ *    that Mina uses for image/motion (/credits/balance, etc.).
+ */
+app.post("/api/credits/shopify-order", async (req, res) => {
   try {
+    // 1) Simple shared-secret check via query param
     const secretFromQuery = req.query.secret;
-    if (
-      !secretFromQuery ||
-      secretFromQuery !== process.env.SHOPIFY_ORDER_WEBHOOK_SECRET
-    ) {
+    if (!secretFromQuery || secretFromQuery !== process.env.SHOPIFY_ORDER_WEBHOOK_SECRET) {
       return res.status(401).json({
         ok: false,
         error: "UNAUTHORIZED",
         message: "Invalid webhook secret",
-        requestId,
       });
     }
 
@@ -1553,7 +1495,6 @@ app.post("/api/credits/shopify-order", (req, res) => {
         ok: false,
         error: "NO_ORDER",
         message: "Missing order payload",
-        requestId,
       });
     }
 
@@ -1562,19 +1503,22 @@ app.post("/api/credits/shopify-order", (req, res) => {
         ok: false,
         error: "NO_CUSTOMER",
         message: "Order has no customer.id",
-        requestId,
       });
     }
 
     const customerId = String(order.customer.id);
-    const items = order.line_items || [];
+
     let creditsToAdd = 0;
+    const items = order.line_items || [];
 
     for (const item of items) {
       const sku = item.sku;
       const quantity = item.quantity || 1;
+
       if (sku && CREDIT_SKUS[sku]) {
-        creditsToAdd += CREDIT_SKUS[sku] * quantity;
+        const perUnit = CREDIT_SKUS[sku];
+        const totalForItem = perUnit * quantity;
+        creditsToAdd += totalForItem;
       }
     }
 
@@ -1582,26 +1526,25 @@ app.post("/api/credits/shopify-order", (req, res) => {
       console.log("[SHOPIFY_WEBHOOK] Order has no credit SKUs. Doing nothing.");
       return res.json({
         ok: true,
-        requestId,
         message: "No credit products found in order.",
         added: 0,
       });
     }
 
-    const rec = addCreditsInternal(
+    // IMPORTANT: use the SAME credits store Mina uses everywhere else
+    const updated = addCreditsInternal(
       customerId,
       creditsToAdd,
       `shopify-order:${order.id || "unknown"}`,
-      "shopify-order"
+      "shopify"
     );
 
     return res.json({
       ok: true,
-      requestId,
       message: "Credits added from Shopify order.",
       customerId,
       added: creditsToAdd,
-      balance: rec.balance,
+      balance: updated.balance,
     });
   } catch (err) {
     console.error("Error in /api/credits/shopify-order:", err);
@@ -1609,69 +1552,30 @@ app.post("/api/credits/shopify-order", (req, res) => {
       ok: false,
       error: "INTERNAL_ERROR",
       message: "Failed to process Shopify order webhook",
-      requestId,
     });
   }
 });
 
-// Debug endpoint: inspect credits + history for a customer
+// =========================
+// PART 8 – Debug credits endpoint (same store as Mina)
+// =========================
+
 app.get("/api/credits/:customerId", (req, res) => {
-  const requestId = `req_${Date.now()}_${uuidv4()}`;
-
-  try {
-    const customerId = req.params.customerId;
-    const rec = getCreditsRecord(customerId);
-
-    return res.json({
-      ok: true,
-      requestId,
-      customerId,
-      balance: rec.balance,
-      history: rec.history,
-    });
-  } catch (err) {
-    console.error("Error in /api/credits/:customerId:", err);
-    return res.status(500).json({
-      ok: false,
-      error: "CREDITS_ERROR",
-      message: err?.message || "Failed to load credits",
-      requestId,
-    });
-  }
-});
-
-// =======================
-// Credits debug endpoint
-// =======================
-app.get("/api/credits/:customerId", (req, res) => {
-  const requestId = `req_${Date.now()}_${uuidv4()}`;
-
-  try {
-    const customerId = req.params.customerId;
-    // This uses the main credits store we defined in PART 3b
-    const rec = getCreditsRecord(customerId);
-
-    return res.json({
-      ok: true,
-      requestId,
-      customerId,
-      balance: rec.balance,
-      history: rec.history,
-    });
-  } catch (err) {
-    console.error("Error in /api/credits/:customerId:", err);
-    return res.status(500).json({
-      ok: false,
-      error: "CREDITS_ERROR",
-      message: err?.message || "Failed to load credits",
-      requestId,
-    });
-  }
+  const customerId = String(req.params.customerId || "anonymous");
+  const rec = getCreditsRecord(customerId);
+  return res.json({
+    ok: true,
+    customerId,
+    balance: rec.balance,
+    history: rec.history,
+  });
 });
 
 // =======================
 // Start server
 // =======================
+
 app.listen(PORT, () => {
   console.log(`Mina Editorial AI API listening on port ${PORT}`);
 });
+
