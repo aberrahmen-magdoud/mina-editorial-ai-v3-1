@@ -1021,6 +1021,34 @@ app.post("/credits/add", (req, res) => {
     });
   }
 });
+// --- Admin API ---
+
+app.get("/admin/summary", async (req, res) => {
+  if (!ensureAdmin(req, res)) return;
+
+  try {
+    if (!prisma) {
+      return res.status(503).json({ error: "Database not available" });
+    }
+
+    const totalCustomers = await prisma.customerCredit.count();
+    const sumResult = await prisma.customerCredit.aggregate({
+      _sum: { balance: true },
+    });
+    const autoTopupOn = await prisma.autoTopupSetting.count({
+      where: { enabled: true },
+    });
+
+    res.json({
+      totalCustomers,
+      totalCredits: sumResult._sum.balance || 0,
+      autoTopupOn,
+    });
+  } catch (err) {
+    console.error("GET /admin/summary error", err);
+    res.status(500).json({ error: "Failed to load admin summary" });
+  }
+});
 
 // ---- Session start ----
 app.post("/sessions/start", (req, res) => {
