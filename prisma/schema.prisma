@@ -1,4 +1,3 @@
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -23,3 +22,51 @@ model AutoTopupSetting {
   updatedAt         DateTime @updatedAt
 }
 
+// NEW – sessions
+model Session {
+  id         String   @id
+  customerId String
+  platform   String
+  title      String
+  createdAt  DateTime @default(now())
+
+  generations Generation[]
+  feedbacks   Feedback[]
+
+  @@index([customerId, createdAt])
+}
+
+// NEW – generations (stills + motion)
+model Generation {
+  id         String   @id
+  type       String   // "image" | "motion"
+  sessionId  String?
+  session    Session? @relation(fields: [sessionId], references: [id])
+  customerId String
+  platform   String
+  prompt     String
+  outputUrl  String
+  createdAt  DateTime @default(now())
+  meta       Json?
+
+  @@index([customerId, createdAt])
+}
+
+// NEW – feedback / likes
+model Feedback {
+  id           String      @id
+  sessionId    String?
+  session      Session?    @relation(fields: [sessionId], references: [id])
+  generationId String?
+  generation   Generation? @relation(fields: [generationId], references: [id])
+  customerId   String
+  resultType   String
+  platform     String
+  prompt       String
+  comment      String
+  imageUrl     String?
+  videoUrl     String?
+  createdAt    DateTime    @default(now())
+
+  @@index([customerId, createdAt])
+}
