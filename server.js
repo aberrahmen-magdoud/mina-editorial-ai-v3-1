@@ -10,6 +10,22 @@ import { v4 as uuidv4 } from "uuid";
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+function ensureAdmin(req, res) {
+  if (!ADMIN_SECRET) {
+    console.warn("ADMIN_SECRET is not set; denying admin access");
+    res.status(503).json({ error: "Admin API not configured" });
+    return false;
+  }
+
+  const header = req.header("x-admin-secret");
+  if (!header || header !== ADMIN_SECRET) {
+    res.status(401).json({ error: "Unauthorized" });
+    return false;
+  }
+
+  return true;
+}
+
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
 
