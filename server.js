@@ -1468,23 +1468,49 @@ app.post("/editorial/generate", async (req, res) => {
       at: new Date().toISOString(),
     });
 
-    // Store generation in in-memory DB
+        // Save generation in memory + DB
     const generationId = `gen_${uuidv4()}`;
-    generations.set(generationId, {
+    const styleHistory = getStyleHistory(customerId);
+    const finalStyleProfile = getOrBuildStyleProfile(customerId, {
+      productImageUrl,
+      styleImageUrls,
+      brief,
+      tone,
+      platform,
+      minaVisionEnabled,
+      stylePresetKey,
+      styleHistory,
+    });
+
+    const generationRecord = {
       id: generationId,
       type: "image",
       sessionId,
       customerId,
       platform,
-      prompt,
+      // for history / gallery we store the brief as prompt
+      prompt: brief || "",
       outputUrl: imageUrl,
       createdAt: new Date().toISOString(),
       meta: {
-        mode: "image",
+        brief,
+        tone,
+        platform,
+        productImageUrl,
+        styleImageUrls,
         minaVisionEnabled,
         stylePresetKey,
+        styleHistory,
+        finalStyleProfile,
       },
-    });
+    };
+
+    generations.set(generationId, generationRecord);
+
+    if (prisma) {
+      void persistGeneration(generationRecord);
+    }
+
 
     res.json({
       ok: true,
