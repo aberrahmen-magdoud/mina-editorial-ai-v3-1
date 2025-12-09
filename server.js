@@ -1021,34 +1021,62 @@ app.post("/credits/add", (req, res) => {
     });
   }
 });
-// --- Admin API ---
+      // --- Admin API ---
+      
+      app.get("/admin/summary", async (req, res) => {
+        if (!ensureAdmin(req, res)) return;
+      
+        try {
+          if (!prisma) {
+            return res.status(503).json({ error: "Database not available" });
+          }
+      
+          const totalCustomers = await prisma.customerCredit.count();
+          const sumResult = await prisma.customerCredit.aggregate({
+            _sum: { balance: true },
+          });
+          const autoTopupOn = await prisma.autoTopupSetting.count({
+            where: { enabled: true },
+          });
+      
+          res.json({
+            totalCustomers,
+            totalCredits: sumResult._sum.balance || 0,
+            autoTopupOn,
+          });
+        } catch (err) {
+          console.error("GET /admin/summary error", err);
+          res.status(500).json({ error: "Failed to load admin summary" });
+        }
+      });
 
-app.get("/admin/summary", async (req, res) => {
+app.get("/admin/customers", async (req, res) => {
   if (!ensureAdmin(req, res)) return;
 
   try {
     if (!prisma) {
-      return res.status(503).json({ error: "Database not available" });
+      // Fallback: use in-memory map only
+      const items = Array.from(credits.entries()).map(
+        ([customerId, rec]) => ({
+          customerId,
+          balance: rec.balance,
+        })
+      );
+      return res.json({ customers: items, source: "memory" });
     }
 
-    const totalCustomers = await prisma.customerCredit.count();
-    const sumResult = await prisma.customerCredit.aggregate({
-      _sum: { balance: true },
-    });
-    const autoTopupOn = await prisma.autoTopupSetting.count({
-      where: { enabled: true },
+    const rows = await prisma.customerCredit.findMany({
+      orderBy: { customerId: "asc" },
+      take: 500,
     });
 
-    res.json({
-      totalCustomers,
-      totalCredits: sumResult._sum.balance || 0,
-      autoTopupOn,
-    });
+    res.json({ customers: rows, source: "db" });
   } catch (err) {
-    console.error("GET /admin/summary error", err);
-    res.status(500).json({ error: "Failed to load admin summary" });
+    console.error("GET /admin/customers error", err);
+    res.status(500).json({ error: "Failed to load admin customers" });
   }
 });
+
 
 // ---- Session start ----
 app.post("/sessions/start", (req, res) => {
