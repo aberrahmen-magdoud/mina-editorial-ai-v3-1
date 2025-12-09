@@ -574,13 +574,16 @@ function createSession({ customerId, platform, title }) {
     title,
     createdAt: new Date().toISOString(),
   };
-  ssessions.set(sessionId, session);
+
+  sessions.set(sessionId, session);
 
   if (prisma) {
     void persistSession(session);
   }
+
   return session;
 }
+
 
 function ensureSession(sessionIdRaw, customerId, platform) {
   const platformNorm = safeString(platform || "tiktok").toLowerCase();
@@ -1459,57 +1462,48 @@ app.post("/editorial/generate", async (req, res) => {
 
     const imageUrl = imageUrls[0] || null;
 
-    // Spend credits AFTER successful generation
-    creditsRecord.balance -= imageCost;
-    creditsRecord.history.push({
-      delta: -imageCost,
-      reason: "editorial-generate",
-      source: "api",
-      at: new Date().toISOString(),
-    });
-
+        // Spend credits AFTER successful generation
+        creditsRecord.balance -= imageCost;
+        creditsRecord.history.push({
+          delta: -imageCost,
+          reason: "editorial-generate",
+          source: "api",
+          at: new Date().toISOString(),
+        });
+        persistCreditsBalance(customerId, creditsRecord.balance);
+    
         // Save generation in memory + DB
-    const generationId = `gen_${uuidv4()}`;
-    const styleHistory = getStyleHistory(customerId);
-    const finalStyleProfile = getOrBuildStyleProfile(customerId, {
-      productImageUrl,
-      styleImageUrls,
-      brief,
-      tone,
-      platform,
-      minaVisionEnabled,
-      stylePresetKey,
-      styleHistory,
-    });
+        const generationId = `gen_${uuidv4()}`;
+    
+        const generationRecord = {
+          id: generationId,
+          type: "image",
+          sessionId,
+          customerId,
+          platform,
+          // for history / gallery we store the brief as prompt
+          prompt: brief || "",
+          outputUrl: imageUrl,
+          createdAt: new Date().toISOString(),
+          meta: {
+            brief,
+            tone,
+            platform,
+            productImageUrl,
+            styleImageUrls,
+            minaVisionEnabled,
+            stylePresetKey,
+            styleHistory,
+            finalStyleProfile,
+          },
+        };
+    
+        generations.set(generationId, generationRecord);
+    
+        if (prisma) {
+          void persistGeneration(generationRecord);
+        }
 
-    const generationRecord = {
-      id: generationId,
-      type: "image",
-      sessionId,
-      customerId,
-      platform,
-      // for history / gallery we store the brief as prompt
-      prompt: brief || "",
-      outputUrl: imageUrl,
-      createdAt: new Date().toISOString(),
-      meta: {
-        brief,
-        tone,
-        platform,
-        productImageUrl,
-        styleImageUrls,
-        minaVisionEnabled,
-        stylePresetKey,
-        styleHistory,
-        finalStyleProfile,
-      },
-    };
-
-    generations.set(generationId, generationRecord);
-
-    if (prisma) {
-      void persistGeneration(generationRecord);
-    }
 
 
     res.json({
@@ -1756,7 +1750,7 @@ app.post("/motion/generate", async (req, res) => {
       }
     }
 
-    // Spend credits AFTER successful generation
+       // Spend credits AFTER successful generation
     creditsRecord.balance -= motionCost;
     creditsRecord.history.push({
       delta: -motionCost,
@@ -1764,24 +1758,40 @@ app.post("/motion/generate", async (req, res) => {
       source: "api",
       at: new Date().toISOString(),
     });
+    persistCreditsBalance(customerId, creditsRecord.balance);
 
+    // Save motion generation in memory + DB
     const generationId = `gen_${uuidv4()}`;
-    generations.set(generationId, {
+
+
+        // Save motion generation in memory + DB
+    const generationId = `gen_${uuidv4()}`;
+
+    const generationRecord = {
       id: generationId,
       type: "motion",
       sessionId,
       customerId,
       platform,
-      prompt,
+      prompt: motionDescription || "",
       outputUrl: videoUrl,
       createdAt: new Date().toISOString(),
       meta: {
-        mode: "motion",
+        tone,
+        platform,
         minaVisionEnabled,
         stylePresetKey,
+        lastImageUrl,
         durationSeconds,
       },
-    });
+    };
+
+    generations.set(generationId, generationRecord);
+
+    if (prisma) {
+      void persistGeneration(generationRecord);
+    }
+
 
     res.json({
       ok: true,
@@ -1862,8 +1872,9 @@ app.post("/feedback/like", (req, res) => {
     });
 
     // Save feedback in in-memory DB
+   
     const feedbackId = `fb_${uuidv4()}`;
-    feedbacks.set(feedbackId, {
+    const feedback = {
       id: feedbackId,
       sessionId: sessionId || null,
       generationId: generationId || null,
@@ -1875,9 +1886,16 @@ app.post("/feedback/like", (req, res) => {
       imageUrl: imageUrl || null,
       videoUrl: videoUrl || null,
       createdAt: new Date().toISOString(),
-    });
+    };
+
+    feedbacks.set(feedbackId, feedback);
+
+    if (prisma) {
+      void persistFeedback(feedback);
+    }
 
     const totalLikes = getLikes(customerId).length;
+
 
     res.json({
       ok: true,
