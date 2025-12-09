@@ -1077,6 +1077,33 @@ app.get("/admin/customers", async (req, res) => {
   }
 });
 
+app.post("/admin/credits/adjust", async (req, res) => {
+  if (!ensureAdmin(req, res)) return;
+
+  try {
+    const { customerId, delta, reason } = req.body || {};
+    if (!customerId || typeof delta !== "number") {
+      return res
+        .status(400)
+        .json({ error: "customerId and numeric delta are required" });
+    }
+
+    const rec = addCreditsInternal(
+      customerId,
+      delta,
+      reason || "admin-adjust",
+      "admin"
+    );
+
+    res.json({
+      customerId: String(customerId),
+      balance: rec.balance,
+    });
+  } catch (err) {
+    console.error("POST /admin/credits/adjust error", err);
+    res.status(500).json({ error: "Failed to adjust credits" });
+  }
+});
 
 // ---- Session start ----
 app.post("/sessions/start", (req, res) => {
