@@ -1757,9 +1757,6 @@ app.post("/motion/generate", async (req, res) => {
     });
     persistCreditsBalance(customerId, creditsRecord.balance);
 
-    // Save motion generation in memory + DB
-    const generationId = `gen_${uuidv4()}`;
-
 
         // Save motion generation in memory + DB
     const generationId = `gen_${uuidv4()}`;
