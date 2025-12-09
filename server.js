@@ -213,8 +213,88 @@ function addCreditsInternal(customerIdRaw, delta, reason, source) {
 
   return rec;
 }
+// --- Billing & auto top-up settings ---
 
+app.get("/billing/settings", async (req, res) => {
+  try {
+    const customerIdRaw = req.query.customerId;
+    if (!customerIdRaw) {
+      return res.status(400).json({ error: "Missing customerId" });
+    }
+    const customerId = String(customerIdRaw);
 
+    if (!prisma) {
+      return res.json({
+        customerId,
+        enabled: false,
+        monthlyLimitPacks: 0,
+        source: "no-db",
+      });
+    }
+
+    const setting = await prisma.autoTopupSetting.findUnique({
+      where: { customerId },
+    });
+
+    if (!setting) {
+      return res.json({
+        customerId,
+        enabled: false,
+        monthlyLimitPacks: 0,
+      });
+    }
+
+    return res.json({
+      customerId: setting.customerId,
+      enabled: setting.enabled,
+      monthlyLimitPacks: setting.monthlyLimitPacks,
+    });
+  } catch (err) {
+    console.error("GET /billing/settings error", err);
+    res.status(500).json({ error: "Failed to load billing settings" });
+  }
+});
+app.post("/billing/settings", async (req, res) => {
+  try {
+    const { customerId, enabled, monthlyLimitPacks } = req.body || {};
+
+    if (!customerId) {
+      return res.status(400).json({ error: "customerId is required" });
+    }
+
+    const packsNumber = Number.isFinite(monthlyLimitPacks)
+      ? Math.max(0, Math.floor(monthlyLimitPacks))
+      : 0;
+
+    if (!prisma) {
+      return res
+        .status(500)
+        .json({ error: "Database not available for billing settings" });
+    }
+
+    const setting = await prisma.autoTopupSetting.upsert({
+      where: { customerId: String(customerId) },
+      update: {
+        enabled: Boolean(enabled),
+        monthlyLimitPacks: packsNumber,
+      },
+      create: {
+        customerId: String(customerId),
+        enabled: Boolean(enabled),
+        monthlyLimitPacks: packsNumber,
+      },
+    });
+
+    res.json({
+      customerId: setting.customerId,
+      enabled: setting.enabled,
+      monthlyLimitPacks: setting.monthlyLimitPacks,
+    });
+  } catch (err) {
+    console.error("POST /billing/settings error", err);
+    res.status(500).json({ error: "Failed to save billing settings" });
+  }
+});
 // ---------------- Helpers ----------------
 function safeString(value, fallback = "") {
   if (value === null || value === undefined) return fallback;
