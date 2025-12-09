@@ -1463,40 +1463,37 @@ app.post("/editorial/generate", async (req, res) => {
     const imageUrl = imageUrls[0] || null;
 
         // Spend credits AFTER successful generation
-        creditsRecord.balance -= imageCost;
-        creditsRecord.history.push({
-          delta: -imageCost,
-          reason: "editorial-generate",
-          source: "api",
-          at: new Date().toISOString(),
-        });
-        persistCreditsBalance(customerId, creditsRecord.balance);
-    
-        // Save generation in memory + DB
-        const generationId = `gen_${uuidv4()}`;
-    
-        const generationRecord = {
-          id: generationId,
-          type: "image",
-          sessionId,
-          customerId,
-          platform,
-          // for history / gallery we store the brief as prompt
-          prompt: brief || "",
-          outputUrl: imageUrl,
-          createdAt: new Date().toISOString(),
-          meta: {
-            brief,
-            tone,
-            platform,
-            productImageUrl,
-            styleImageUrls,
-            minaVisionEnabled,
-            stylePresetKey,
-            styleHistory,
-            finalStyleProfile,
-          },
-        };
+    creditsRecord.balance -= motionCost;
+    creditsRecord.history.push({
+      delta: -motionCost,
+      reason: "motion-generate",
+      source: "api",
+      at: new Date().toISOString(),
+    });
+    persistCreditsBalance(customerId, creditsRecord.balance);
+
+    // Save motion generation in memory + DB
+    const generationId = `gen_${uuidv4()}`;
+
+    const generationRecord = {
+      id: generationId,
+      type: "motion",
+      sessionId,
+      customerId,
+      platform,
+      prompt: motionDescription || "",
+      outputUrl: videoUrl,
+      createdAt: new Date().toISOString(),
+      meta: {
+        tone,
+        platform,
+        minaVisionEnabled,
+        stylePresetKey,
+        lastImageUrl,
+        durationSeconds,
+      },
+    };
+
     
         generations.set(generationId, generationRecord);
     
