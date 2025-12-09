@@ -574,7 +574,11 @@ function createSession({ customerId, platform, title }) {
     title,
     createdAt: new Date().toISOString(),
   };
-  sessions.set(sessionId, session);
+  ssessions.set(sessionId, session);
+
+  if (prisma) {
+    void persistSession(session);
+  }
   return session;
 }
 
