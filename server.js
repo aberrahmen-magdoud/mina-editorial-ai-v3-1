@@ -603,7 +603,7 @@ function ensureSession(sessionIdRaw, customerId, platform) {
   });
 }
 // Shopify login sync (Mina_users tag + Welcome matcha)
-const SHOPIFY_STORE_DOMAIN = process.env.SHOPIFY_STORE_DOMAIN || "";
+
 const SHOPIFY_ADMIN_TOKEN = process.env.SHOPIFY_ADMIN_TOKEN || "";
 const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || "2025-10";
 const SHOPIFY_WELCOME_MATCHA_VARIANT_ID =
