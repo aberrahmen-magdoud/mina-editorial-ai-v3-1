@@ -1302,29 +1302,98 @@ The attached image is the still to animate. Propose one natural-language motion 
   };
 }
 
+
 // =======================
-// PART 6 – Core routes (health, credits, editorial, motion, feedback)
+// PART 6 – Core routes (health, stats, credits, editorial, motion, feedback)
 // =======================
 
 // Health
-app.get("/health", (req, res) => {
+app.get("/health", (_req, res) => {
   res.json({
-    ok: true,
-    service: "Mina Editorial AI API",
+    status: "ok",
+    service: "mina-editorial-ai-api",
     time: new Date().toISOString(),
   });
 });
 
-app.get("/", (req, res) => {
-  res.json({
+app.get("/", (_req, res) => {
+  res.send("Mina Editorial AI API is healthy.");
+});
+
+// public stats → total users on login screen
+app.get("/public/stats/total-users", async (_req, res) => {
+  const requestId = `stats_${Date.now()}`;
+
+  // 1) try shopify `customersCount` for tag Mina_users
+  if (SHOPIFY_STORE_DOMAIN && SHOPIFY_ADMIN_ACCESS_TOKEN) {
+    try {
+      const endpoint = `https://${SHOPIFY_STORE_DOMAIN}/admin/api/2025-10/graphql.json`;
+      const query = `
+        query MinaUsersCount($query: String) {
+          customersCount(query: $query) {
+            count
+          }
+        }
+      `;
+
+      const shopifyRes = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": SHOPIFY_ADMIN_ACCESS_TOKEN,
+        },
+        body: JSON.stringify({
+          query,
+          variables: { query: `tag:${SHOPIFY_MINA_TAG}` },
+        }),
+      });
+
+      if (shopifyRes.ok) {
+        const json = await shopifyRes.json();
+        const count = json?.data?.customersCount?.count;
+
+        if (typeof count === "number") {
+          return res.json({
+            ok: true,
+            requestId,
+            source: "shopify",
+            totalUsers: count,
+          });
+        }
+
+        console.error("[mina] unexpected shopify customersCount payload", json);
+      } else {
+        console.error(
+          "[mina] shopify customersCount http error",
+          shopifyRes.status,
+          await shopifyRes.text()
+        );
+      }
+    } catch (err) {
+      console.error("[mina] shopify customersCount failed", err);
+    }
+  }
+
+  // 2) fallback = how many customers we know in our own db
+  let fallback = 0;
+  try {
+    // if you later add prisma.customerCredit etc you can swap here
+    fallback = 0;
+  } catch (err) {
+    console.error("[mina] fallback total users failed", err);
+  }
+
+  return res.json({
     ok: true,
-    service: "Mina Editorial AI API",
-    hint: "Use /health, /editorial/generate, /motion/generate, /credits/balance",
+    requestId,
+    source: SHOPIFY_STORE_DOMAIN ? "fallback" : "local",
+    totalUsers: fallback,
   });
 });
 
 // ---- Credits: balance ----
-app.get("/credits/balance", (req, res) => {
+app.get("/credits/balance", async (req, res) => {
+
   const requestId = `req_${Date.now()}_${uuidv4()}`;
   try {
     const customerIdRaw = req.query.customerId || "anonymous";
