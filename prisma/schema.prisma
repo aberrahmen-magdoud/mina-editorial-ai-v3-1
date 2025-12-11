@@ -15,20 +15,20 @@ model CustomerCredit {
 }
 
 model AutoTopupSetting {
-  customerId        String   @id
-  enabled           Boolean  @default(false)
-  monthlyLimitPacks Int      @default(0)
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  customerId       String   @id
+  enabled          Boolean
+  monthlyLimitPacks Int
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 }
 
-// NEW – sessions
 model Session {
   id         String   @id
   customerId String
   platform   String
   title      String
   createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 
   generations Generation[]
   feedbacks   Feedback[]
@@ -36,25 +36,26 @@ model Session {
   @@index([customerId, createdAt])
 }
 
-// NEW – generations (stills + motion)
 model Generation {
   id         String   @id
-  type       String   // "image" | "motion"
+  type       String
   sessionId  String?
-  session    Session? @relation(fields: [sessionId], references: [id])
+  session    Session?  @relation(fields: [sessionId], references: [id])
   customerId String
   platform   String
   prompt     String
   outputUrl  String
-  createdAt  DateTime @default(now())
   meta       Json?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
   feedbacks  Feedback[]
+
   @@index([customerId, createdAt])
 }
 
-// NEW – feedback / likes
 model Feedback {
-  id           String      @id
+  id           String   @id
   sessionId    String?
   session      Session?    @relation(fields: [sessionId], references: [id])
   generationId String?
@@ -66,7 +67,8 @@ model Feedback {
   comment      String
   imageUrl     String?
   videoUrl     String?
-  createdAt    DateTime    @default(now())
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
   @@index([customerId, createdAt])
 }
