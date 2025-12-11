@@ -11,15 +11,15 @@ model CustomerCredit {
   customerId String   @id
   balance    Int
   createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  updatedAt  DateTime @default(now()) @updatedAt
 }
 
 model AutoTopupSetting {
-  customerId       String   @id
-  enabled          Boolean
+  customerId        String   @id
+  enabled           Boolean
   monthlyLimitPacks Int
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @default(now()) @updatedAt
 }
 
 model Session {
@@ -28,7 +28,7 @@ model Session {
   platform   String
   title      String
   createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  updatedAt  DateTime @default(now()) @updatedAt
 
   generations Generation[]
   feedbacks   Feedback[]
@@ -47,7 +47,7 @@ model Generation {
   outputUrl  String
   meta       Json?
   createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  updatedAt  DateTime @default(now()) @updatedAt
 
   feedbacks  Feedback[]
 
@@ -68,7 +68,7 @@ model Feedback {
   imageUrl     String?
   videoUrl     String?
   createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  updatedAt    DateTime @default(now()) @updatedAt
 
   @@index([customerId, createdAt])
 }
