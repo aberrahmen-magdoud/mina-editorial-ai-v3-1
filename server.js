@@ -7,12 +7,65 @@ import Replicate from "replicate";
 import OpenAI from "openai";
 import { v4 as uuidv4 } from "uuid";
 import { parseDataUrl, makeKey, putBufferToR2, publicUrlForKey, storeRemoteImageToR2 } from "./r2.js";
+import multer from "multer";
+import crypto from "node:crypto";
+import { S3Client, PutObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const MINA_BASELINE_USERS = 3651; // offset we add on top of DB users
 
 // NOTE: We removed TypeScript interfaces here to keep this file pure JS.
+// ============================
+// R2 setup (Cloudflare R2 = S3 compatible)
+// ============================
+const R2_ACCOUNT_ID = process.env.R2_ACCOUNT_ID;
+const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID;
+const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY;
+const R2_BUCKET = process.env.R2_BUCKET;
+
+// Optional override, otherwise computed from account id
+const R2_ENDPOINT =
+  process.env.R2_ENDPOINT || `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`;
+
+const r2 = new S3Client({
+  region: "auto",
+  endpoint: R2_ENDPOINT,
+  credentials: {
+    accessKeyId: R2_ACCESS_KEY_ID,
+    secretAccessKey: R2_SECRET_ACCESS_KEY,
+  },
+});
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 25 * 1024 * 1024 }, // 25MB
+});
+
+function safeName(name = "file") {
+  return name.replace(/[^a-zA-Z0-9._-]/g, "_");
+}
+
+async function r2PutAndSignGet({ key, body, contentType }) {
+  await r2.send(
+    new PutObjectCommand({
+      Bucket: R2_BUCKET,
+      Key: key,
+      Body: body,
+      ContentType: contentType || "application/octet-stream",
+    })
+  );
+
+  // Signed GET URL (works even if bucket is private)
+  const signedUrl = await getSignedUrl(
+    r2,
+    new GetObjectCommand({ Bucket: R2_BUCKET, Key: key }),
+    { expiresIn: 60 * 60 * 24 * 7 } // 7 days
+  );
+
+  return signedUrl;
+}
 
 // Admin auth helper
 const ADMIN_SECRET = process.env.ADMIN_SECRET || "";
@@ -2240,6 +2293,127 @@ app.get("/history/admin/overview", (req, res) => {
   res.status(400).json({ ok: false, error: err?.message || "store_remote_failed" });
   }
   });
+
+// ============================
+// 3B) Upload endpoint (frontend -> R2)
+// ============================
+app.post("/upload", upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ ok: false, error: "NO_FILE" });
+    }
+
+    // optional fields you can send from frontend
+    const customerId = (req.body?.customerId || "anon").toString();
+    const folder = (req.body?.folder || "uploads").toString();
+
+    const extGuess =
+      req.file.mimetype?.includes("png")
+        ? "png"
+        : req.file.mimetype?.includes("jpeg")
+        ? "jpg"
+        : req.file.mimetype?.includes("webp")
+        ? "webp"
+        : req.file.mimetype?.includes("gif")
+        ? "gif"
+        : "";
+
+    const base = safeName(req.file.originalname || "upload");
+    const uuid = crypto.randomUUID();
+    const key = `${folder}/${customerId}/${Date.now()}-${uuid}-${base}${
+      extGuess && !base.toLowerCase().endsWith(`.${extGuess}`) ? `.${extGuess}` : ""
+    }`;
+
+    const url = await r2PutAndSignGet({
+      key,
+      body: req.file.buffer,
+      contentType: req.file.mimetype,
+    });
+
+    return res.json({
+      ok: true,
+      key,
+      url, // signed GET url
+      contentType: req.file.mimetype,
+      size: req.file.size,
+    });
+  } catch (err) {
+    console.error("POST /upload error:", err);
+    return res.status(500).json({ ok: false, error: "UPLOAD_FAILED" });
+  }
+});
+
+// ============================
+// 3B) Store remote generation (Replicate/OpenAI result URL -> R2)
+// ============================
+app.post("/store-remote-generation", async (req, res) => {
+  try {
+    const { url, urls, customerId, folder } = req.body || {};
+
+    const remoteUrl =
+      (typeof url === "string" && url) ||
+      (Array.isArray(urls) && typeof urls[0] === "string" ? urls[0] : "");
+
+    if (!remoteUrl) {
+      return res.status(400).json({ ok: false, error: "NO_URL" });
+    }
+
+    const cid = (customerId || "anon").toString();
+    const fold = (folder || "generations").toString();
+
+    const resp = await fetch(remoteUrl);
+    if (!resp.ok) {
+      return res.status(400).json({
+        ok: false,
+        error: "REMOTE_FETCH_FAILED",
+        status: resp.status,
+      });
+    }
+
+    const contentType =
+      resp.headers.get("content-type") || "application/octet-stream";
+    const arrayBuf = await resp.arrayBuffer();
+    const buf = Buffer.from(arrayBuf);
+
+    const uuid = crypto.randomUUID();
+
+    // small extension guess
+    const ext =
+      contentType.includes("png")
+        ? "png"
+        : contentType.includes("jpeg")
+        ? "jpg"
+        : contentType.includes("webp")
+        ? "webp"
+        : contentType.includes("gif")
+        ? "gif"
+        : contentType.includes("mp4")
+        ? "mp4"
+        : "";
+
+    const key = `${fold}/${cid}/${Date.now()}-${uuid}${
+      ext ? `.${ext}` : ""
+    }`;
+
+    const storedUrl = await r2PutAndSignGet({
+      key,
+      body: buf,
+      contentType,
+    });
+
+    return res.json({
+      ok: true,
+      key,
+      url: storedUrl, // signed GET url
+      contentType,
+      size: buf.length,
+      sourceUrl: remoteUrl,
+    });
+  } catch (err) {
+    console.error("POST /store-remote-generation error:", err);
+    return res.status(500).json({ ok: false, error: "STORE_REMOTE_FAILED" });
+  }
+});
 
 // =======================
 // PART 10 – Start server
