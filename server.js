@@ -484,6 +484,38 @@ app.post("/billing/settings", async (req, res) => {
     res.status(500).json({ error: "Failed to save billing settings" });
   }
 });
+// =========================
+// R2 Upload + Store Remote
+// =========================
+
+app.post("/api/r2/upload", async (req, res) => {
+  try {
+    const { dataUrl, kind = "uploads" } = req.body || {};
+    const { buffer, contentType, ext } = parseDataUrl(dataUrl);
+
+    const key = makeKey({ kind, ext });
+    await putBufferToR2({ key, buffer, contentType });
+
+    const url = publicUrlForKey(key);
+    res.json({ ok: true, key, url, contentType, bytes: buffer.length });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err?.message || "upload_failed" });
+  }
+});
+
+app.post("/api/r2/store-remote", async (req, res) => {
+  try {
+    const { url, kind = "generations" } = req.body || {};
+    if (!url) throw new Error("Missing url");
+
+    const out = await storeRemoteImageToR2({ url, kind });
+    res.json({ ok: true, ...out });
+  } catch (err) {
+    res
+      .status(400)
+      .json({ ok: false, error: err?.message || "store_remote_failed" });
+  }
+});
 
 // =======================
 // PART 3d – Small helpers
