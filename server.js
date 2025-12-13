@@ -1542,13 +1542,23 @@ app.post("/editorial/generate", async (req, res) => {
 
     const prompt = promptResult.prompt;
 
-    // Map platform to aspect ratio
-    let aspectRatio = "4:5";
-    if (platform.includes("tiktok") || platform.includes("reel")) {
-      aspectRatio = "9:16";
-    } else if (platform.includes("youtube")) {
-      aspectRatio = "16:9";
-    }
+    // Map platform to aspect ratio (allow explicit override from client)
+const requestedAspect = safeString(body.aspectRatio || "");
+const validAspects = new Set(["9:16", "3:4", "2:3", "1:1", "4:5", "16:9"]);
+
+let aspectRatio = "2:3";
+
+// 1) Client override wins (your UI sends this)
+if (validAspects.has(requestedAspect)) {
+  aspectRatio = requestedAspect;
+} else {
+  // 2) Otherwise infer from platform keys
+  if (platform === "tiktok" || platform.includes("reel")) aspectRatio = "9:16";
+  else if (platform === "instagram-post") aspectRatio = "3:4";
+  else if (platform === "print") aspectRatio = "2:3";
+  else if (platform === "square") aspectRatio = "1:1";
+  else if (platform.includes("youtube")) aspectRatio = "16:9";
+}
 
     const input = {
       prompt,
