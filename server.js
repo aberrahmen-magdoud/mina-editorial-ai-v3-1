@@ -128,7 +128,7 @@ const STYLE_PRESETS = {
         "timeless-magazine-look",
       ],
       description:
-        "editorial still life with a luxurious, magazine-era feel. Clean tabletop compositions, smooth backgrounds, and muted tones with gentle contrast. Subtle grain and soft highlights give a timeless, refined look while keeping the scene minimal and polished. no frames",
+        "editorial still life with a luxurious, magazine-era feel. Clean  compositions, smooth backgrounds, and muted tones with gentle contrast. Subtle grain and soft highlights give a timeless, refined look while keeping the scene minimal and polished. no frames",
     },
     heroImageUrls: ["https://assets.faltastudio.com/Website%20Assets/Vintage%201.png"],
   },
@@ -148,7 +148,7 @@ const STYLE_PRESETS = {
         "crisp-specular-highlights",
       ],
       description:
-        "Minimal luxury still life shot against a smooth gradient backdrop, often with the subject floating or staged to feel weightless. Editorial lighting with subtle rim/backlight and controlled shadows, designed to showcase hyper-detailed textures and sculptural forms.",
+        "Minimal luxury still life shot against a smooth gradient backdrop, Editorial lighting with subtle rim/backlight and controlled shadows,hyper-detailed textures and sculptural forms.",
     },
     heroImageUrls: ["https://assets.faltastudio.com/Website%20Assets/Gradient%200.png"],
   },
