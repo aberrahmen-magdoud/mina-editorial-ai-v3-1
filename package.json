@@ -2,7 +2,7 @@
 "name": "mina-editorial-ai",
 "version": "1.0.0",
 "type": "module",
-"main": "server.js",
+"main": "index.js",
 "scripts": {
 "start": "node server.js",
 "db:push": "prisma db push"
