@@ -128,7 +128,7 @@ const STYLE_PRESETS = {
         "timeless-magazine-look",
       ],
       description:
-        "Vintage-inspired editorial still life with a luxurious, magazine-era feel. Clean tabletop compositions, smooth backgrounds, and muted tones with gentle contrast. Subtle grain and soft highlights give a timeless, refined look while keeping the scene minimal and polished.",
+        "Vintage-inspired editorial still life with a luxurious, magazine-era feel. Clean tabletop compositions, smooth backgrounds, and muted tones with gentle contrast. Subtle grain and soft highlights give a timeless, refined look while keeping the scene minimal and polished. no frames",
     },
     heroImageUrls: ["https://assets.faltastudio.com/Website%20Assets/Vintage%201.png"],
   },
