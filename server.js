@@ -945,7 +945,6 @@ async function getOrBuildStyleProfile(customerIdRaw, likes) {
 async function buildEditorialPrompt(payload) {
   const {
     productImageUrl,
-    // NEW: optional logo image; attach to GPT vision if provided.
     logoImageUrl = "",
     styleImageUrls = [],
     brief,
@@ -957,11 +956,9 @@ async function buildEditorialPrompt(payload) {
     presetHeroImageUrls = [],
   } = payload;
 
+  // Build a fallback prompt in case GPT fails
   const fallbackPrompt = [
-    safeString(
-      brief,
-      "Editorial still-life product photo of the hero product on a simple surface."
-    ),
+    safeString(brief, "Editorial still-life product photo."),
     tone ? `Tone: ${tone}.` : "",
     `Shot for ${platform}, clean composition, professional lighting.`,
     "Hero product in focus, refined minimal background, fashion/editorial style.",
@@ -969,12 +966,10 @@ async function buildEditorialPrompt(payload) {
     .join(" ")
     .trim();
 
+  // Combine history and style profile for context
   const historyText = styleHistory.length
     ? styleHistory
-        .map(
-          (item, idx) =>
-            `${idx + 1}) [${item.platform}] ${item.prompt || ""}`
-        )
+        .map((item, idx) => `${idx + 1}) [${item.platform}] ${item.prompt || ""}`)
         .join("\n")
     : "none yet – this might be their first liked result.";
 
@@ -987,16 +982,20 @@ async function buildEditorialPrompt(payload) {
       ? styleProfile.keywords.join(", ")
       : "";
 
+  // System prompt instructs GPT to write a single descriptive prompt
   const systemMessage = {
     role: "system",
     content:
-      "You are Mina, an editorial art director for fashion & beauty. " +
-      "You will see one product image and up to several style reference images. " +
-      "You write ONE clear prompt for a generative image model. " +
-      "Describe subject, environment, lighting, camera, mood, and style. " +
-      "Do NOT include line breaks, lists, or bullet points. One paragraph max.",
+      "You are Mina, an editorial art director for fashion & beauty." +
+      " You will see one product image, an optional logo, and up to several style reference images." +
+      " You write ONE clear prompt for a generative image model." +
+      " Describe subject, environment, lighting, camera, mood, and style." +
+      " Do NOT include line breaks, lists, or bullet points. One paragraph max." +
+      " After the prompt, return JSON with two fields: 'imageTexts' (array of captions for each image uploaded)" +
+      " and 'userMessage' (a friendly remark about one or more of the images).",
   };
 
+  // User text contains the user's brief, tone, platform and style profile
   const userText = `
 You are creating a new ${mode} for Mina.
 
@@ -1015,28 +1014,28 @@ Description: ${profileDescription}
 
 The attached images are:
 - Main product image as the hero subject
+- Optional logo image for brand identity
 - Up to 3 style/mood references from the user
 - Optional preset hero style image(s) defining a strong mood/look
 
 Write the final prompt I should send to the image model.
+Also, after the prompt, output JSON with 'imageTexts' and 'userMessage'.
 `.trim();
 
+  // Build list of image attachments for GPT (product, logo, style, preset)
   const imageParts = [];
-  // Attach the main product image for GPT vision.
   if (productImageUrl) {
     imageParts.push({
       type: "image_url",
       image_url: { url: productImageUrl },
     });
   }
-  // Attach logo if provided.  This ensures GPT sees the brand mark.
   if (logoImageUrl) {
     imageParts.push({
       type: "image_url",
       image_url: { url: logoImageUrl },
     });
   }
-  // Attach up to three user-supplied inspiration images.
   (styleImageUrls || [])
     .slice(0, 3)
     .filter((url) => !!url)
@@ -1046,8 +1045,6 @@ Write the final prompt I should send to the image model.
         image_url: { url },
       });
     });
-
-  // Attach exactly one preset hero image if provided.  This image conveys the mood.
   (presetHeroImageUrls || [])
     .slice(0, 1)
     .filter((url) => !!url)
@@ -1058,6 +1055,7 @@ Write the final prompt I should send to the image model.
       });
     });
 
+  // Build the user content for GPT: combine text and images
   const userContent =
     imageParts.length > 0
       ? [
@@ -1069,13 +1067,49 @@ Write the final prompt I should send to the image model.
         ]
       : userText;
 
-  return runChatWithFallback({
-    systemMessage,
-    userContent,
-    fallbackPrompt,
-  });
+  // Call GPT; parse the response into prompt and JSON metadata
+  try {
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4.1-mini",
+      messages: [systemMessage, { role: "user", content: userContent }],
+      temperature: 0.8,
+      max_tokens: 420,
+    });
+    const response = completion.choices?.[0]?.message?.content?.trim() || "";
+    // Split prompt and JSON metadata: assume JSON starts after first '{'
+    const firstBrace = response.indexOf("{");
+    let prompt = response;
+    let meta = { imageTexts: [], userMessage: "" };
+    if (firstBrace >= 0) {
+      prompt = response.slice(0, firstBrace).trim();
+      const jsonString = response.slice(firstBrace);
+      try {
+        const parsed = JSON.parse(jsonString);
+        if (Array.isArray(parsed.imageTexts)) meta.imageTexts = parsed.imageTexts;
+        if (typeof parsed.userMessage === "string") meta.userMessage = parsed.userMessage;
+      } catch (e) {
+        // ignore JSON parse errors
+      }
+    }
+    return {
+      prompt,
+      usedFallback: false,
+      gptError: null,
+      imageTexts: meta.imageTexts,
+      userMessage: meta.userMessage,
+    };
+  } catch (err) {
+    // On GPT failure, return fallback prompt with no transcripts
+    console.error("buildEditorialPrompt GPT error: ", err?.message);
+    return {
+      prompt: fallbackPrompt,
+      usedFallback: true,
+      gptError: { status: err?.status || null, message: err?.message || String(err) },
+      imageTexts: [],
+      userMessage: "",
+    };
+  }
 }
-
 
 // Motion prompt for Kling (used only when generating video)
 async function buildMotionPrompt(options) {
@@ -1269,7 +1303,7 @@ The attached image is the still to animate. Propose one natural-language motion 
 // =======================
 
 // Health
-app.get("/health", (req, res) => {
+app.get("/health", (_req, res) => {
   res.json({
     ok: true,
     service: "Mina Editorial AI API",
@@ -1277,7 +1311,7 @@ app.get("/health", (req, res) => {
   });
 });
 
-app.get("/", (req, res) => {
+app.get("/", (_req, res) => {
   res.json({
     ok: true,
     service: "Mina Editorial AI API",
@@ -1289,7 +1323,6 @@ app.get("/", (req, res) => {
 app.get("/public/stats/total-users", async (_req, res) => {
   const requestId = `stats_${Date.now()}`;
 
-  // If Prisma/DB is not available, don't fake numbers
   if (!prisma) {
     return res.json({
       ok: false,
@@ -1300,11 +1333,8 @@ app.get("/public/stats/total-users", async (_req, res) => {
   }
 
   try {
-    // Each row in customerCredit corresponds to one customerId
     const dbCount = await prisma.customerCredit.count();
-
     const total = dbCount + MINA_BASELINE_USERS;
-
     return res.json({
       ok: true,
       requestId,
@@ -1322,7 +1352,7 @@ app.get("/public/stats/total-users", async (_req, res) => {
   }
 });
 
-// ---- Credits: balance ----
+// Credits: balance
 app.get("/credits/balance", async (req, res) => {
   const requestId = `req_${Date.now()}_${uuidv4()}`;
   try {
@@ -1351,7 +1381,7 @@ app.get("/credits/balance", async (req, res) => {
   }
 });
 
-// ---- Credits: add (manual / via webhook) ----
+// Credits: add (manual / via webhook)
 app.post("/credits/add", (req, res) => {
   const requestId = `req_${Date.now()}_${uuidv4()}`;
   try {
@@ -1393,7 +1423,7 @@ app.post("/credits/add", (req, res) => {
   }
 });
 
-// --- Admin API (summary & credits customers/adjust) ---
+// Admin API (summary & credits customers/adjust)
 app.get("/admin/summary", async (req, res) => {
   if (!ensureAdmin(req, res)) return;
 
@@ -1426,7 +1456,6 @@ app.get("/admin/customers", async (req, res) => {
 
   try {
     if (!prisma) {
-      // Fallback: use in-memory map only
       const items = Array.from(credits.entries()).map(
         ([customerId, rec]) => ({
           customerId,
@@ -1476,7 +1505,7 @@ app.post("/admin/credits/adjust", async (req, res) => {
   }
 });
 
-// ---- Session start ----
+// Session start
 app.post("/sessions/start", (req, res) => {
   const requestId = `req_${Date.now()}_${uuidv4()}`;
   try {
@@ -1511,67 +1540,196 @@ app.post("/sessions/start", (req, res) => {
 
 // ---- Mina Editorial (image) ----
 app.post("/editorial/generate", async (req, res) => {
-  // … existing code …
-  const productImageUrl = safeString(body.productImageUrl);
-  // NEW: allow optional logo image
-  const logoImageUrl = safeString(body.logoImageUrl || "");
-  const styleImageUrls = Array.isArray(body.styleImageUrls)
-    ? body.styleImageUrls
-    : [];
-  // … other request-body fields …
+  const requestId = `req_${Date.now()}_${uuidv4()}`;
 
-  // Build the prompt, passing in the logo as well
-  const promptResult = await buildEditorialPrompt({
-    productImageUrl,
-    logoImageUrl,
-    styleImageUrls,
-    brief,
-    tone,
-    platform,
-    mode: "image",
-    styleHistory,
-    styleProfile: finalStyleProfile,
-    presetHeroImageUrls: preset?.heroImageUrls || [],
-  });
+  try {
+    const body = req.body || {};
+    const productImageUrl = safeString(body.productImageUrl);
+    // NEW: optional logo image
+    const logoImageUrl = safeString(body.logoImageUrl || "");
+    const styleImageUrls = Array.isArray(body.styleImageUrls)
+      ? body.styleImageUrls
+      : [];
+    const brief = safeString(body.brief);
+    const tone = safeString(body.tone);
+    const platform = safeString(body.platform || "tiktok").toLowerCase();
+    const minaVisionEnabled = !!body.minaVisionEnabled;
+    const stylePresetKey = safeString(body.stylePresetKey || "");
+    const preset = stylePresetKey ? STYLE_PRESETS[stylePresetKey] || null : null;
 
-  const prompt = promptResult.prompt;
-  // If vision returns transcripts or a user message, attach them to the generation meta
-  const imageTexts = promptResult.imageTexts || [];
-  const userMessage = promptResult.userMessage || "";
+    const customerId =
+      body.customerId !== null && body.customerId !== undefined
+        ? String(body.customerId)
+        : "anonymous";
 
-  // … SeaDream call and credit deduction …
+    if (!productImageUrl && !brief) {
+      return res.status(400).json({
+        ok: false,
+        error: "MISSING_INPUT",
+        message:
+          "Provide at least productImageUrl or brief so Mina knows what to create.",
+        requestId,
+      });
+    }
 
-  // Save image generation in memory + DB
-  const generationRecord = {
-    id: generationId,
-    type: "image",
-    sessionId,
-    customerId,
-    platform,
-    prompt: prompt || "",
-    outputUrl: imageUrl,
-    createdAt: new Date().toISOString(),
-    meta: {
-      tone,
-      platform,
-      minaVisionEnabled,
-      stylePresetKey,
+    // Credits check
+    const creditsRecord = getCreditsRecord(customerId);
+    const imageCost = IMAGE_CREDITS_COST;
+    if (creditsRecord.balance < imageCost) {
+      return res.status(402).json({
+        ok: false,
+        error: "INSUFFICIENT_CREDITS",
+        message: `Not enough Mina credits. Need ${imageCost}, you have ${creditsRecord.balance}.`,
+        requiredCredits: imageCost,
+        currentCredits: creditsRecord.balance,
+        requestId,
+      });
+    }
+
+    // Session
+    const session = ensureSession(body.sessionId, customerId, platform);
+    const sessionId = session.id;
+
+    let styleHistory = [];
+    let userStyleProfile = null;
+    let finalStyleProfile = null;
+    let styleProfileMeta = null;
+
+    if (minaVisionEnabled && customerId) {
+      const likes = getLikes(customerId);
+      styleHistory = getStyleHistory(customerId);
+      const profileRes = await getOrBuildStyleProfile(customerId, likes);
+      userStyleProfile = profileRes.profile;
+
+      const merged = mergePresetAndUserProfile(
+        preset ? preset.profile : null,
+        userStyleProfile
+      );
+      finalStyleProfile = merged.profile;
+      styleProfileMeta = {
+        ...profileRes.meta,
+        presetKey: stylePresetKey || null,
+        mergeSource: merged.source,
+      };
+    } else {
+      styleHistory = [];
+      const merged = mergePresetAndUserProfile(
+        preset ? preset.profile : null,
+        null
+      );
+      finalStyleProfile = merged.profile;
+      styleProfileMeta = {
+        source: merged.source,
+        likesCount: 0,
+        presetKey: stylePresetKey || null,
+      };
+    }
+
+    // Build the prompt and collect transcripts/userMessage
+    const promptResult = await buildEditorialPrompt({
       productImageUrl,
-      // Store the optional logo image URL
       logoImageUrl,
       styleImageUrls,
-      aspectRatio,
-      // Store any transcripts / user message returned by GPT
-      imageTexts,
-      userMessage,
-    },
-  };
-  // … persist generationRecord and return response …
-});
+      brief,
+      tone,
+      platform,
+      mode: "image",
+      styleHistory,
+      styleProfile: finalStyleProfile,
+      presetHeroImageUrls: preset?.heroImageUrls || [],
+    });
 
+    const prompt = promptResult.prompt;
+    const imageTexts = promptResult.imageTexts || [];
+    const userMessage = promptResult.userMessage || "";
+
+    // Infer aspect ratio from the platform or request
+    const requestedAspect = safeString(body.aspectRatio || "");
+    const validAspects = new Set(["9:16", "3:4", "2:3", "1:1", "3:2", "16:9"]);
+    let aspectRatio = "2:3";
+    if (validAspects.has(requestedAspect)) {
+      aspectRatio = requestedAspect;
+    } else {
+      if (platform === "tiktok" || platform.includes("reel")) aspectRatio = "9:16";
+      else if (platform === "instagram-post") aspectRatio = "3:4";
+      else if (platform === "print") aspectRatio = "2:3";
+      else if (platform === "square") aspectRatio = "1:1";
+      else if (platform.includes("youtube")) aspectRatio = "16:9";
+    }
+
+    // Prepare input for SeaDream
+    const input = {
+      prompt,
+      image_input: productImageUrl
+        ? [productImageUrl, ...styleImageUrls]
+        : styleImageUrls,
+      max_images: body.maxImages || 1,
+      size: "2K",
+      aspect_ratio: aspectRatio,
+      enhance_prompt: true,
+      sequential_image_generation: "disabled",
+    };
+
+    const output = await replicate.run(SEADREAM_MODEL, { input });
+
+    let imageUrls = [];
+    if (Array.isArray(output)) {
+      imageUrls = output
+        .map((item) => {
+          if (typeof item === "string") return item;
+          if (item && typeof item === "object") {
+            return item.url || item.image || null;
+          }
+          return null;
+        })
+        .filter(Boolean);
+    } else if (typeof output === "string") {
+      imageUrls = [output];
+    } else if (output && typeof output === "object") {
+      if (typeof output.url === "string") imageUrls = [output.url];
+      else if (Array.isArray(output.output)) {
+        imageUrls = output.output.filter((v) => typeof v === "string");
+      }
+    }
+
+    const imageUrl = imageUrls[0] || null;
+
+    // Spend credits AFTER successful generation
+    creditsRecord.balance -= imageCost;
+    creditsRecord.history.push({
+      delta: -imageCost,
+      reason: "image-generate",
+      source: "api",
+      at: new Date().toISOString(),
+    });
+    persistCreditsBalance(customerId, creditsRecord.balance);
+
+    // Save image generation in memory + DB
+    const generationId = `gen_${uuidv4()}`;
+    const generationRecord = {
+      id: generationId,
+      type: "image",
+      sessionId,
+      customerId,
+      platform,
+      prompt: prompt || "",
+      outputUrl: imageUrl,
+      createdAt: new Date().toISOString(),
+      meta: {
+        tone,
+        platform,
+        minaVisionEnabled,
+        stylePresetKey,
+        productImageUrl,
+        logoImageUrl,
+        styleImageUrls,
+        aspectRatio,
+        imageTexts,
+        userMessage,
+      },
+    };
 
     generations.set(generationId, generationRecord);
-
     if (prisma) {
       void persistGeneration(generationRecord);
     }
@@ -1596,6 +1754,8 @@ app.post("/editorial/generate", async (req, res) => {
         error: promptResult.gptError,
         styleProfile: finalStyleProfile,
         styleProfileMeta,
+        imageTexts,
+        userMessage,
       },
     });
   } catch (err) {
@@ -1853,7 +2013,6 @@ app.post("/motion/generate", async (req, res) => {
     };
 
     generations.set(generationId, generationRecord);
-
     if (prisma) {
       void persistGeneration(generationRecord);
     }
@@ -1897,6 +2056,7 @@ app.post("/motion/generate", async (req, res) => {
     });
   }
 });
+
 
 // ---- Feedback / likes (image + motion) ----
 app.post("/feedback/like", (req, res) => {
