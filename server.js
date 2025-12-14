@@ -113,55 +113,66 @@ const KLING_MODEL =
 // =======================
 
 const STYLE_PRESETS = {
-  "soft-desert-editorial": {
-    name: "Soft Desert Editorial",
+  vintage: {
+    name: "Vintage",
     profile: {
       keywords: [
-        "warm-sand-tones",
-        "soft-shadows",
-        "minimal-backdrop",
-        "hazy-light",
-        "tactile-textures",
+        "vintage-editorial-still-life",
+        "film-grain-texture",
+        "muted-color-palette",
+        "soft-contrast",
+        "gentle-vignette",
+        "studio-tabletop",
+        "smooth-clean-backdrop",
+        "subtle-flash-highlights",
+        "timeless-magazine-look",
       ],
       description:
-        "Soft beige and sand-inspired tones, minimal props, hazy sunlight and gentle shadows. Feels calm, warm and tactile, like a quiet desert morning.",
+        "Vintage-inspired editorial still life with a luxurious, magazine-era feel. Clean tabletop compositions, smooth backgrounds, and muted tones with gentle contrast. Subtle grain and soft highlights give a timeless, refined look while keeping the scene minimal and polished.",
     },
-    heroImageUrls: ["https://cdn.example.com/mina/styles/soft-desert-1.jpg"],
+    heroImageUrls: ["https://assets.faltastudio.com/Website%20Assets/Vintage%201.png"],
   },
-  "chrome-neon-night": {
-    name: "Chrome Neon Night",
+
+  gradient: {
+    name: "Gradient",
     profile: {
       keywords: [
-        "neon-rim-light",
-        "high-contrast",
-        "dark-background",
-        "chrome-reflections",
-        "futuristic",
+        "gradient-background",
+        "midair-suspension",
+        "luxury-editorial-still-life",
+        "minimal-composition",
+        "hyper-texture-detail",
+        "sculptural-subject",
+        "dramatic-rim-light",
+        "soft-vignette-falloff",
+        "crisp-specular-highlights",
       ],
       description:
-        "Dark environments with strong neon rim lights and chrome reflections. High contrast, sharp edges and a futuristic, night-city atmosphere.",
+        "Minimal luxury still life shot against a smooth gradient backdrop, often with the subject floating or staged to feel weightless. Editorial lighting with subtle rim/backlight and controlled shadows, designed to showcase hyper-detailed textures and sculptural forms.",
     },
-    heroImageUrls: ["https://cdn.example.com/mina/styles/chrome-neon-1.jpg"],
+    heroImageUrls: ["https://assets.faltastudio.com/Website%20Assets/Gradient%200.png"],
   },
-  "bathroom-ritual": {
-    name: "Bathroom Ritual",
+
+  "back-light": {
+    name: "Back Light",
     profile: {
       keywords: [
-        "marble-surfaces",
-        "soft-bathroom-light",
-        "steam-mist",
-        "care-ritual",
-        "intimate-closeups",
+        "luxury-editorial-still-life",
+        "high-key-light-background",
+        "backlit-translucency",
+        "glass-refractions",
+        "clean-specular-highlights",
+        "minimal-composition",
+        "soft-shadow-falloff",
+        "premium-studio-look",
       ],
       description:
-        "Clean marble surfaces, soft bathroom lighting, hints of steam and water. Intimate close-ups that feel like a self-care ritual moment.",
+        "Luxurious editorial still life on a bright, minimal background. Clean studio lighting with glossy glass reflections and a strong backlight that reveals inner translucency and subtle texture, creating a premium, sculptural feel.",
     },
-    heroImageUrls: [
-      "https://cdn.example.com/mina/styles/bathroom-ritual-1.jpg",
-    ],
+    heroImageUrls: ["https://assets.faltastudio.com/Website%20Assets/Backlight.png"],
   },
-  // Add more presets later.
 };
+
 
 // =======================
 // PART 3 – In-memory “DB”
