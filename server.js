@@ -80,9 +80,9 @@ function getRequestMeta(req) {
 }
 
 function auditAiEvent(req, action, status, detail = {}) {
-  const meta = getRequestMeta(req);
-  const userId = req.user?.userId;
-  const email = req.user?.email;
+  const meta = req ? getRequestMeta(req) : {};
+  const userId = req?.user?.userId;
+  const email = req?.user?.email;
   void logAdminAction({
     userId,
     email,
@@ -102,12 +102,13 @@ function auditAiEvent(req, action, status, detail = {}) {
 
 function persistSessionHash(req, token, userId, email) {
   if (!token) return;
+  const meta = req ? getRequestMeta(req) : {};
   void upsertSessionRow({
     userId,
     email,
     token,
-    ip: req.ip,
-    userAgent: req.get("user-agent"),
+    ip: meta.ip,
+    userAgent: meta.userAgent,
   });
 }
 
