@@ -175,6 +175,7 @@ export async function upsertGenerationRow({
   inputChars,
   outputChars,
   latencyMs,
+  meta,
   detail,
 }) {
   try {
@@ -201,7 +202,7 @@ export async function upsertGenerationRow({
       input_chars: typeof inputChars === "number" ? inputChars : null,
       output_chars: typeof outputChars === "number" ? outputChars : null,
       latency_ms: typeof latencyMs === "number" ? latencyMs : null,
-      detail: detail ?? null,
+      meta: meta ?? detail ?? null,
       created_at: now,
       updated_at: now,
     };
