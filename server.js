@@ -12,7 +12,8 @@ import multer from "multer";
 import crypto from "node:crypto";
 import { S3Client, PutObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-import { createClient } from "@supabase/supabase-js";
+import { logAdminAction, upsertGenerationRow, upsertSessionRow } from "./supabase.js";
+import { requireAdmin } from "./auth.js";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -69,23 +70,35 @@ async function r2PutAndSignGet({ key, body, contentType }) {
   return signedUrl;
 }
 
-// Admin auth helper
-const ADMIN_SECRET = process.env.ADMIN_SECRET || "";
+function getRequestMeta(req) {
+  return {
+    ip: req.ip,
+    userAgent: req.get("user-agent"),
+    route: req.path,
+    method: req.method,
+  };
+}
 
-function ensureAdmin(req, res) {
-  if (!ADMIN_SECRET) {
-    console.warn("ADMIN_SECRET is not set; denying admin access");
-    res.status(503).json({ error: "Admin API not configured" });
-    return false;
-  }
+function auditAiEvent(req, action, status, detail = {}) {
+  const meta = getRequestMeta(req);
+  void logAdminAction({
+    action,
+    status,
+    route: meta.route,
+    method: meta.method,
+    detail: { ...detail, ip: meta.ip, userAgent: meta.userAgent },
+  });
+}
 
-  const header = req.header("x-admin-secret");
-  if (!header || header !== ADMIN_SECRET) {
-    res.status(401).json({ error: "Unauthorized" });
-    return false;
-  }
-
-  return true;
+function persistSessionHash(req, token, userId, email) {
+  if (!token) return;
+  void upsertSessionRow({
+    userId,
+    email,
+    token,
+    ip: req.ip,
+    userAgent: req.get("user-agent"),
+  });
 }
 
 app.use(cors());
@@ -347,6 +360,21 @@ async function persistGeneration(gen) {
         outputUrl: gen.outputUrl,
         meta: gen.meta ?? undefined,
       },
+    });
+
+    void upsertGenerationRow({
+      id: gen.id,
+      requestId: gen.meta?.requestId,
+      sessionId: gen.sessionId,
+      userId: gen.meta?.userId,
+      email: gen.meta?.email,
+      model: gen.meta?.model,
+      provider: gen.meta?.provider,
+      status: gen.meta?.status || gen.type,
+      inputChars: gen.meta?.inputChars,
+      outputChars: gen.meta?.outputChars,
+      latencyMs: gen.meta?.latencyMs,
+      detail: gen.meta ?? null,
     });
   } catch (err) {
     console.error("[db] Failed to persist generation", gen.id, err);
@@ -1425,9 +1453,7 @@ app.post("/credits/add", (req, res) => {
 });
 
 // Admin API (summary & credits customers/adjust)
-app.get("/admin/summary", async (req, res) => {
-  if (!ensureAdmin(req, res)) return;
-
+app.get("/admin/summary", requireAdmin, async (req, res) => {
   try {
     if (!prisma) {
       return res.status(503).json({ error: "Database not available" });
@@ -1452,9 +1478,7 @@ app.get("/admin/summary", async (req, res) => {
   }
 });
 
-app.get("/admin/customers", async (req, res) => {
-  if (!ensureAdmin(req, res)) return;
-
+app.get("/admin/customers", requireAdmin, async (req, res) => {
   try {
     if (!prisma) {
       const items = Array.from(credits.entries()).map(
@@ -1478,9 +1502,7 @@ app.get("/admin/customers", async (req, res) => {
   }
 });
 
-app.post("/admin/credits/adjust", async (req, res) => {
-  if (!ensureAdmin(req, res)) return;
-
+app.post("/admin/credits/adjust", requireAdmin, async (req, res) => {
   try {
     const { customerId, delta, reason } = req.body || {};
     if (!customerId || typeof delta !== "number") {
@@ -1542,6 +1564,7 @@ app.post("/sessions/start", (req, res) => {
 // ---- Mina Editorial (image) ----
 app.post("/editorial/generate", async (req, res) => {
   const requestId = `req_${Date.now()}_${uuidv4()}`;
+  const startedAt = Date.now();
 
   try {
     const body = req.body || {};
@@ -1564,6 +1587,12 @@ app.post("/editorial/generate", async (req, res) => {
         : "anonymous";
 
     if (!productImageUrl && !brief) {
+      auditAiEvent(req, "ai_error", 400, {
+        request_id: requestId,
+        model: SEADREAM_MODEL,
+        provider: "replicate",
+        detail: { reason: "missing_input" },
+      });
       return res.status(400).json({
         ok: false,
         error: "MISSING_INPUT",
@@ -1577,6 +1606,16 @@ app.post("/editorial/generate", async (req, res) => {
     const creditsRecord = getCreditsRecord(customerId);
     const imageCost = IMAGE_CREDITS_COST;
     if (creditsRecord.balance < imageCost) {
+      auditAiEvent(req, "ai_error", 402, {
+        request_id: requestId,
+        model: SEADREAM_MODEL,
+        provider: "replicate",
+        detail: {
+          reason: "insufficient_credits",
+          required: imageCost,
+          balance: creditsRecord.balance,
+        },
+      });
       return res.status(402).json({
         ok: false,
         error: "INSUFFICIENT_CREDITS",
@@ -1590,6 +1629,7 @@ app.post("/editorial/generate", async (req, res) => {
     // Session
     const session = ensureSession(body.sessionId, customerId, platform);
     const sessionId = session.id;
+    persistSessionHash(req, sessionId || requestId, req.user?.userId, req.user?.email);
 
     let styleHistory = [];
     let userStyleProfile = null;
@@ -1643,6 +1683,17 @@ app.post("/editorial/generate", async (req, res) => {
     const prompt = promptResult.prompt;
     const imageTexts = promptResult.imageTexts || [];
     const userMessage = promptResult.userMessage || "";
+
+    auditAiEvent(req, "ai_request", 200, {
+      request_id: requestId,
+      session_id: sessionId,
+      customer_id: customerId,
+      model: SEADREAM_MODEL,
+      provider: "replicate",
+      input_chars: (prompt || "").length,
+      stylePresetKey,
+      minaVisionEnabled,
+    });
 
     // Infer aspect ratio from the platform or request
     const requestedAspect = safeString(body.aspectRatio || "");
@@ -1727,13 +1778,62 @@ app.post("/editorial/generate", async (req, res) => {
         aspectRatio,
         imageTexts,
         userMessage,
+        requestId,
       },
+    };
+
+    const latencyMs = Date.now() - startedAt;
+    const outputChars = imageUrls.join(",").length;
+
+    generationRecord.meta = {
+      ...generationRecord.meta,
+      latencyMs,
+      inputChars: (prompt || "").length,
+      outputChars,
+      model: SEADREAM_MODEL,
+      provider: "replicate",
+      status: "succeeded",
+      userId: req.user?.userId,
+      email: req.user?.email,
     };
 
     generations.set(generationId, generationRecord);
     if (prisma) {
       void persistGeneration(generationRecord);
     }
+
+    auditAiEvent(req, "ai_response", 200, {
+      request_id: requestId,
+      session_id: sessionId,
+      customer_id: customerId,
+      model: SEADREAM_MODEL,
+      provider: "replicate",
+      latency_ms: latencyMs,
+      input_chars: (prompt || "").length,
+      output_chars: outputChars,
+      detail: { generationId },
+    });
+
+    void upsertGenerationRow({
+      id: generationId,
+      requestId,
+      sessionId,
+      userId: req.user?.userId,
+      email: req.user?.email,
+      model: SEADREAM_MODEL,
+      provider: "replicate",
+      status: "succeeded",
+      inputChars: (prompt || "").length,
+      outputChars,
+      latencyMs,
+      detail: {
+        customerId,
+        platform,
+        aspectRatio,
+        minaVisionEnabled,
+        stylePresetKey,
+      },
+    });
 
     res.json({
       ok: true,
@@ -1761,6 +1861,14 @@ app.post("/editorial/generate", async (req, res) => {
     });
   } catch (err) {
     console.error("Error in /editorial/generate:", err);
+
+    auditAiEvent(req, "ai_error", 500, {
+      request_id: requestId,
+      model: SEADREAM_MODEL,
+      provider: "replicate",
+      latency_ms: Date.now() - startedAt,
+      detail: { error: err?.message },
+    });
     res.status(500).json({
       ok: false,
       error: "EDITORIAL_GENERATION_ERROR",
@@ -1773,11 +1881,18 @@ app.post("/editorial/generate", async (req, res) => {
 // ---- Motion suggestion (for textarea) ----
 app.post("/motion/suggest", async (req, res) => {
   const requestId = `req_${Date.now()}_${uuidv4()}`;
+  const startedAt = Date.now();
 
   try {
     const body = req.body || {};
     const referenceImageUrl = safeString(body.referenceImageUrl);
     if (!referenceImageUrl) {
+      auditAiEvent(req, "ai_error", 400, {
+        request_id: requestId,
+        model: "gpt-4.1-mini",
+        provider: "openai",
+        detail: { reason: "missing_reference_image" },
+      });
       return res.status(400).json({
         ok: false,
         error: "MISSING_REFERENCE_IMAGE",
@@ -1796,6 +1911,22 @@ app.post("/motion/suggest", async (req, res) => {
       body.customerId !== null && body.customerId !== undefined
         ? String(body.customerId)
         : "anonymous";
+
+    persistSessionHash(
+      req,
+      body.sessionId || customerId || requestId,
+      req.user?.userId,
+      req.user?.email
+    );
+
+    auditAiEvent(req, "ai_request", 200, {
+      request_id: requestId,
+      session_id: body.sessionId || null,
+      customer_id: customerId,
+      model: "gpt-4.1-mini",
+      provider: "openai",
+      input_chars: JSON.stringify(body || {}).length,
+    });
 
     let styleHistory = [];
     let userStyleProfile = null;
@@ -1826,6 +1957,18 @@ app.post("/motion/suggest", async (req, res) => {
       styleProfile: finalStyleProfile,
     });
 
+    const latencyMs = Date.now() - startedAt;
+    auditAiEvent(req, "ai_response", 200, {
+      request_id: requestId,
+      session_id: body.sessionId || null,
+      customer_id: customerId,
+      model: "gpt-4.1-mini",
+      provider: "openai",
+      latency_ms: latencyMs,
+      input_chars: JSON.stringify(body || {}).length,
+      output_chars: (suggestionRes.text || "").length,
+    });
+
     res.json({
       ok: true,
       requestId,
@@ -1837,6 +1980,14 @@ app.post("/motion/suggest", async (req, res) => {
     });
   } catch (err) {
     console.error("Error in /motion/suggest:", err);
+
+    auditAiEvent(req, "ai_error", 500, {
+      request_id: requestId,
+      model: "gpt-4.1-mini",
+      provider: "openai",
+      latency_ms: Date.now() - startedAt,
+      detail: { error: err?.message },
+    });
     res.status(500).json({
       ok: false,
       error: "MOTION_SUGGESTION_ERROR",
@@ -1849,6 +2000,7 @@ app.post("/motion/suggest", async (req, res) => {
 // ---- Mina Motion (video) ----
 app.post("/motion/generate", async (req, res) => {
   const requestId = `req_${Date.now()}_${uuidv4()}`;
+  const startedAt = Date.now();
 
   try {
     const body = req.body || {};
@@ -1866,6 +2018,12 @@ app.post("/motion/generate", async (req, res) => {
         : "anonymous";
 
     if (!lastImageUrl) {
+      auditAiEvent(req, "ai_error", 400, {
+        request_id: requestId,
+        model: KLING_MODEL,
+        provider: "replicate",
+        detail: { reason: "missing_last_image" },
+      });
       return res.status(400).json({
         ok: false,
         error: "MISSING_LAST_IMAGE",
@@ -1875,6 +2033,12 @@ app.post("/motion/generate", async (req, res) => {
     }
 
     if (!motionDescription) {
+      auditAiEvent(req, "ai_error", 400, {
+        request_id: requestId,
+        model: KLING_MODEL,
+        provider: "replicate",
+        detail: { reason: "missing_motion_description" },
+      });
       return res.status(400).json({
         ok: false,
         error: "MISSING_MOTION_DESCRIPTION",
@@ -1887,6 +2051,16 @@ app.post("/motion/generate", async (req, res) => {
     const creditsRecord = getCreditsRecord(customerId);
     const motionCost = MOTION_CREDITS_COST;
     if (creditsRecord.balance < motionCost) {
+      auditAiEvent(req, "ai_error", 402, {
+        request_id: requestId,
+        model: KLING_MODEL,
+        provider: "replicate",
+        detail: {
+          reason: "insufficient_credits",
+          required: motionCost,
+          balance: creditsRecord.balance,
+        },
+      });
       return res.status(402).json({
         ok: false,
         error: "INSUFFICIENT_CREDITS",
@@ -1900,6 +2074,7 @@ app.post("/motion/generate", async (req, res) => {
     // Session
     const session = ensureSession(body.sessionId, customerId, platform);
     const sessionId = session.id;
+    persistSessionHash(req, sessionId || requestId, req.user?.userId, req.user?.email);
 
     let styleHistory = [];
     let userStyleProfile = null;
@@ -1949,6 +2124,17 @@ app.post("/motion/generate", async (req, res) => {
     let durationSeconds = Number(body.durationSeconds || 5);
     if (durationSeconds > 10) durationSeconds = 10;
     if (durationSeconds < 1) durationSeconds = 1;
+
+    auditAiEvent(req, "ai_request", 200, {
+      request_id: requestId,
+      session_id: sessionId,
+      customer_id: customerId,
+      model: KLING_MODEL,
+      provider: "replicate",
+      input_chars: (prompt || "").length,
+      stylePresetKey,
+      minaVisionEnabled,
+    });
 
     const input = {
       mode: "standard",
@@ -2010,13 +2196,62 @@ app.post("/motion/generate", async (req, res) => {
         stylePresetKey,
         lastImageUrl,
         durationSeconds,
+        requestId,
       },
+    };
+
+    const latencyMs = Date.now() - startedAt;
+    const outputChars = (videoUrl || "").length;
+
+    generationRecord.meta = {
+      ...generationRecord.meta,
+      latencyMs,
+      inputChars: (prompt || "").length,
+      outputChars,
+      model: KLING_MODEL,
+      provider: "replicate",
+      status: "succeeded",
+      userId: req.user?.userId,
+      email: req.user?.email,
     };
 
     generations.set(generationId, generationRecord);
     if (prisma) {
       void persistGeneration(generationRecord);
     }
+
+    auditAiEvent(req, "ai_response", 200, {
+      request_id: requestId,
+      session_id: sessionId,
+      customer_id: customerId,
+      model: KLING_MODEL,
+      provider: "replicate",
+      latency_ms: latencyMs,
+      input_chars: (prompt || "").length,
+      output_chars: outputChars,
+      detail: { generationId },
+    });
+
+    void upsertGenerationRow({
+      id: generationId,
+      requestId,
+      sessionId,
+      userId: req.user?.userId,
+      email: req.user?.email,
+      model: KLING_MODEL,
+      provider: "replicate",
+      status: "succeeded",
+      inputChars: (prompt || "").length,
+      outputChars,
+      latencyMs,
+      detail: {
+        customerId,
+        platform,
+        durationSeconds,
+        minaVisionEnabled,
+        stylePresetKey,
+      },
+    });
 
     res.json({
       ok: true,
@@ -2049,6 +2284,13 @@ app.post("/motion/generate", async (req, res) => {
     });
   } catch (err) {
     console.error("Error in /motion/generate:", err);
+    auditAiEvent(req, "ai_error", 500, {
+      request_id: requestId,
+      model: KLING_MODEL,
+      provider: "replicate",
+      latency_ms: Date.now() - startedAt,
+      detail: { error: err?.message },
+    });
     res.status(500).json({
       ok: false,
       error: "MOTION_GENERATION_ERROR",
@@ -2299,28 +2541,8 @@ app.get("/history/customer/:customerId", (req, res) => {
   }
 });
 
-const ADMIN_DASHBOARD_KEY = process.env.ADMIN_DASHBOARD_KEY || "";
-
-app.get("/history/admin/overview", (req, res) => {
+app.get("/history/admin/overview", requireAdmin, (req, res) => {
   try {
-    if (!ADMIN_DASHBOARD_KEY) {
-      return res.status(500).json({
-        ok: false,
-        error: "ADMIN_KEY_NOT_SET",
-        message:
-          "ADMIN_DASHBOARD_KEY is not configured on the server. Set it in Render env vars.",
-      });
-    }
-
-    const key = req.query.key;
-    if (!key || key !== ADMIN_DASHBOARD_KEY) {
-      return res.status(401).json({
-        ok: false,
-        error: "UNAUTHORIZED",
-        message: "Invalid admin key.",
-      });
-    }
-
     const allGenerations = Array.from(generations.values()).sort((a, b) => {
       const tA = new Date(a.createdAt || 0).getTime();
       const tB = new Date(b.createdAt || 0).getTime();
