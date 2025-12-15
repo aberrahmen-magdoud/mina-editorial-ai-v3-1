@@ -80,24 +80,72 @@ function getRequestMeta(req) {
 }
 
 function auditAiEvent(req, action, status, detail = {}) {
-  const meta = getRequestMeta(req);
+  const meta = req ? getRequestMeta(req) : {};
+  const userId = req?.user?.userId;
+  const email = req?.user?.email;
+  const normalizedDetail = { ...detail };
+  normalizedDetail.request_id =
+    normalizedDetail.request_id || normalizedDetail.requestId || null;
+  normalizedDetail.step = normalizedDetail.step || normalizedDetail.stage || null;
+  normalizedDetail.input_type =
+    normalizedDetail.input_type || normalizedDetail.inputType || null;
+  normalizedDetail.output_type =
+    normalizedDetail.output_type || normalizedDetail.outputType || null;
+  normalizedDetail.r2_url = normalizedDetail.r2_url || normalizedDetail.r2Url || null;
+  normalizedDetail.model = normalizedDetail.model || null;
+  normalizedDetail.provider = normalizedDetail.provider || null;
+  normalizedDetail.latency_ms =
+    typeof normalizedDetail.latency_ms === "number"
+      ? normalizedDetail.latency_ms
+      : typeof normalizedDetail.latencyMs === "number"
+        ? normalizedDetail.latencyMs
+        : null;
+  normalizedDetail.input_chars =
+    typeof normalizedDetail.input_chars === "number"
+      ? normalizedDetail.input_chars
+      : typeof normalizedDetail.inputChars === "number"
+        ? normalizedDetail.inputChars
+        : null;
+  normalizedDetail.output_chars =
+    typeof normalizedDetail.output_chars === "number"
+      ? normalizedDetail.output_chars
+      : typeof normalizedDetail.outputChars === "number"
+        ? normalizedDetail.outputChars
+        : null;
+
+  delete normalizedDetail.requestId;
+  delete normalizedDetail.inputType;
+  delete normalizedDetail.outputType;
+  delete normalizedDetail.r2Url;
+  delete normalizedDetail.latencyMs;
+  delete normalizedDetail.inputChars;
+  delete normalizedDetail.outputChars;
+
+  normalizedDetail.ip = meta.ip;
+  normalizedDetail.userAgent = meta.userAgent;
+  normalizedDetail.user_id = userId || undefined;
+  normalizedDetail.email = email || undefined;
+
   void logAdminAction({
+    userId,
+    email,
     action,
     status,
-    route: meta.route,
-    method: meta.method,
-    detail: { ...detail, ip: meta.ip, userAgent: meta.userAgent },
+    route: detail.route || meta.route,
+    method: detail.method || meta.method,
+    detail: normalizedDetail,
   });
 }
 
 function persistSessionHash(req, token, userId, email) {
   if (!token) return;
+  const meta = req ? getRequestMeta(req) : {};
   void upsertSessionRow({
     userId,
     email,
     token,
-    ip: req.ip,
-    userAgent: req.get("user-agent"),
+    ip: meta.ip,
+    userAgent: meta.userAgent,
   });
 }
 
@@ -374,7 +422,7 @@ async function persistGeneration(gen) {
       inputChars: gen.meta?.inputChars,
       outputChars: gen.meta?.outputChars,
       latencyMs: gen.meta?.latencyMs,
-      detail: gen.meta ?? null,
+      meta: gen.meta ?? null,
     });
   } catch (err) {
     console.error("[db] Failed to persist generation", gen.id, err);
@@ -1564,6 +1612,7 @@ app.post("/sessions/start", (req, res) => {
 // ---- Mina Editorial (image) ----
 app.post("/editorial/generate", async (req, res) => {
   const requestId = `req_${Date.now()}_${uuidv4()}`;
+  const generationId = `gen_${uuidv4()}`;
   const startedAt = Date.now();
 
   try {
@@ -1589,8 +1638,12 @@ app.post("/editorial/generate", async (req, res) => {
     if (!productImageUrl && !brief) {
       auditAiEvent(req, "ai_error", 400, {
         request_id: requestId,
+        step: "vision",
+        input_type: "text",
+        output_type: "image",
         model: SEADREAM_MODEL,
         provider: "replicate",
+        generation_id: generationId,
         detail: { reason: "missing_input" },
       });
       return res.status(400).json({
@@ -1608,8 +1661,12 @@ app.post("/editorial/generate", async (req, res) => {
     if (creditsRecord.balance < imageCost) {
       auditAiEvent(req, "ai_error", 402, {
         request_id: requestId,
+        step: "vision",
+        input_type: productImageUrl ? "image" : "text",
+        output_type: "image",
         model: SEADREAM_MODEL,
         provider: "replicate",
+        generation_id: generationId,
         detail: {
           reason: "insufficient_credits",
           required: imageCost,
@@ -1686,6 +1743,9 @@ app.post("/editorial/generate", async (req, res) => {
 
     auditAiEvent(req, "ai_request", 200, {
       request_id: requestId,
+      step: "vision",
+      input_type: productImageUrl ? "image" : "text",
+      output_type: "image",
       session_id: sessionId,
       customer_id: customerId,
       model: SEADREAM_MODEL,
@@ -1693,6 +1753,7 @@ app.post("/editorial/generate", async (req, res) => {
       input_chars: (prompt || "").length,
       stylePresetKey,
       minaVisionEnabled,
+      generation_id: generationId,
     });
 
     // Infer aspect ratio from the platform or request
@@ -1757,7 +1818,6 @@ app.post("/editorial/generate", async (req, res) => {
     persistCreditsBalance(customerId, creditsRecord.balance);
 
     // Save image generation in memory + DB
-    const generationId = `gen_${uuidv4()}`;
     const generationRecord = {
       id: generationId,
       type: "image",
@@ -1804,6 +1864,10 @@ app.post("/editorial/generate", async (req, res) => {
 
     auditAiEvent(req, "ai_response", 200, {
       request_id: requestId,
+      step: "vision",
+      input_type: productImageUrl ? "image" : "text",
+      output_type: "image",
+      r2_url: imageUrl,
       session_id: sessionId,
       customer_id: customerId,
       model: SEADREAM_MODEL,
@@ -1811,7 +1875,7 @@ app.post("/editorial/generate", async (req, res) => {
       latency_ms: latencyMs,
       input_chars: (prompt || "").length,
       output_chars: outputChars,
-      detail: { generationId },
+      generation_id: generationId,
     });
 
     void upsertGenerationRow({
@@ -1826,7 +1890,12 @@ app.post("/editorial/generate", async (req, res) => {
       inputChars: (prompt || "").length,
       outputChars,
       latencyMs,
-      detail: {
+      meta: {
+        requestId,
+        step: "vision",
+        input_type: productImageUrl ? "image" : "text",
+        output_type: "image",
+        r2_url: imageUrl,
         customerId,
         platform,
         aspectRatio,
@@ -1864,10 +1933,36 @@ app.post("/editorial/generate", async (req, res) => {
 
     auditAiEvent(req, "ai_error", 500, {
       request_id: requestId,
+      step: "vision",
+      input_type: productImageUrl ? "image" : "text",
+      output_type: "image",
       model: SEADREAM_MODEL,
       provider: "replicate",
       latency_ms: Date.now() - startedAt,
+      generation_id: generationId,
       detail: { error: err?.message },
+    });
+
+    void upsertGenerationRow({
+      id: generationId,
+      requestId,
+      sessionId: safeString(req.body?.sessionId) || null,
+      userId: req.user?.userId,
+      email: req.user?.email,
+      model: SEADREAM_MODEL,
+      provider: "replicate",
+      status: "failed",
+      latencyMs: Date.now() - startedAt,
+      meta: {
+        requestId,
+        step: "vision",
+        input_type: productImageUrl ? "image" : "text",
+        output_type: "image",
+        customerId,
+        platform: safeString(req.body?.platform || "") || null,
+        stylePresetKey: safeString(req.body?.stylePresetKey || "") || null,
+        error: err?.message,
+      },
     });
     res.status(500).json({
       ok: false,
@@ -1881,6 +1976,7 @@ app.post("/editorial/generate", async (req, res) => {
 // ---- Motion suggestion (for textarea) ----
 app.post("/motion/suggest", async (req, res) => {
   const requestId = `req_${Date.now()}_${uuidv4()}`;
+  const generationId = `gen_${uuidv4()}`;
   const startedAt = Date.now();
 
   try {
@@ -1889,8 +1985,12 @@ app.post("/motion/suggest", async (req, res) => {
     if (!referenceImageUrl) {
       auditAiEvent(req, "ai_error", 400, {
         request_id: requestId,
+        step: "caption",
+        input_type: "image",
+        output_type: "text",
         model: "gpt-4.1-mini",
         provider: "openai",
+        generation_id: generationId,
         detail: { reason: "missing_reference_image" },
       });
       return res.status(400).json({
@@ -1921,11 +2021,15 @@ app.post("/motion/suggest", async (req, res) => {
 
     auditAiEvent(req, "ai_request", 200, {
       request_id: requestId,
+      step: "caption",
+      input_type: referenceImageUrl ? "image" : "text",
+      output_type: "text",
       session_id: body.sessionId || null,
       customer_id: customerId,
       model: "gpt-4.1-mini",
       provider: "openai",
       input_chars: JSON.stringify(body || {}).length,
+      generation_id: generationId,
     });
 
     let styleHistory = [];
@@ -1960,6 +2064,9 @@ app.post("/motion/suggest", async (req, res) => {
     const latencyMs = Date.now() - startedAt;
     auditAiEvent(req, "ai_response", 200, {
       request_id: requestId,
+      step: "caption",
+      input_type: referenceImageUrl ? "image" : "text",
+      output_type: "text",
       session_id: body.sessionId || null,
       customer_id: customerId,
       model: "gpt-4.1-mini",
@@ -1967,6 +2074,29 @@ app.post("/motion/suggest", async (req, res) => {
       latency_ms: latencyMs,
       input_chars: JSON.stringify(body || {}).length,
       output_chars: (suggestionRes.text || "").length,
+      generation_id: generationId,
+    });
+
+    void upsertGenerationRow({
+      id: generationId,
+      requestId,
+      sessionId: body.sessionId || null,
+      userId: req.user?.userId,
+      email: req.user?.email,
+      model: "gpt-4.1-mini",
+      provider: "openai",
+      status: "succeeded",
+      inputChars: JSON.stringify(body || {}).length,
+      outputChars: (suggestionRes.text || "").length,
+      latencyMs,
+      meta: {
+        requestId,
+        step: "caption",
+        input_type: referenceImageUrl ? "image" : "text",
+        output_type: "text",
+        customerId,
+        sessionId: body.sessionId || null,
+      },
     });
 
     res.json({
@@ -1983,10 +2113,34 @@ app.post("/motion/suggest", async (req, res) => {
 
     auditAiEvent(req, "ai_error", 500, {
       request_id: requestId,
+      step: "caption",
+      input_type: referenceImageUrl ? "image" : "text",
+      output_type: "text",
       model: "gpt-4.1-mini",
       provider: "openai",
       latency_ms: Date.now() - startedAt,
+      generation_id: generationId,
       detail: { error: err?.message },
+    });
+
+    void upsertGenerationRow({
+      id: generationId,
+      requestId,
+      sessionId: req.body?.sessionId || null,
+      userId: req.user?.userId,
+      email: req.user?.email,
+      model: "gpt-4.1-mini",
+      provider: "openai",
+      status: "failed",
+      latencyMs: Date.now() - startedAt,
+      meta: {
+        requestId,
+        step: "caption",
+        input_type: referenceImageUrl ? "image" : "text",
+        output_type: "text",
+        customerId,
+        error: err?.message,
+      },
     });
     res.status(500).json({
       ok: false,
@@ -2000,6 +2154,7 @@ app.post("/motion/suggest", async (req, res) => {
 // ---- Mina Motion (video) ----
 app.post("/motion/generate", async (req, res) => {
   const requestId = `req_${Date.now()}_${uuidv4()}`;
+  const generationId = `gen_${uuidv4()}`;
   const startedAt = Date.now();
 
   try {
@@ -2020,8 +2175,12 @@ app.post("/motion/generate", async (req, res) => {
     if (!lastImageUrl) {
       auditAiEvent(req, "ai_error", 400, {
         request_id: requestId,
+        step: "motion",
+        input_type: "text",
+        output_type: "image",
         model: KLING_MODEL,
         provider: "replicate",
+        generation_id: generationId,
         detail: { reason: "missing_last_image" },
       });
       return res.status(400).json({
@@ -2035,8 +2194,12 @@ app.post("/motion/generate", async (req, res) => {
     if (!motionDescription) {
       auditAiEvent(req, "ai_error", 400, {
         request_id: requestId,
+        step: "motion",
+        input_type: "text",
+        output_type: "image",
         model: KLING_MODEL,
         provider: "replicate",
+        generation_id: generationId,
         detail: { reason: "missing_motion_description" },
       });
       return res.status(400).json({
@@ -2053,8 +2216,12 @@ app.post("/motion/generate", async (req, res) => {
     if (creditsRecord.balance < motionCost) {
       auditAiEvent(req, "ai_error", 402, {
         request_id: requestId,
+        step: "motion",
+        input_type: "text",
+        output_type: "image",
         model: KLING_MODEL,
         provider: "replicate",
+        generation_id: generationId,
         detail: {
           reason: "insufficient_credits",
           required: motionCost,
@@ -2127,6 +2294,9 @@ app.post("/motion/generate", async (req, res) => {
 
     auditAiEvent(req, "ai_request", 200, {
       request_id: requestId,
+      step: "motion",
+      input_type: "text",
+      output_type: "image",
       session_id: sessionId,
       customer_id: customerId,
       model: KLING_MODEL,
@@ -2134,6 +2304,7 @@ app.post("/motion/generate", async (req, res) => {
       input_chars: (prompt || "").length,
       stylePresetKey,
       minaVisionEnabled,
+      generation_id: generationId,
     });
 
     const input = {
@@ -2178,8 +2349,6 @@ app.post("/motion/generate", async (req, res) => {
     persistCreditsBalance(customerId, creditsRecord.balance);
 
     // Save motion generation in memory + DB
-    const generationId = `gen_${uuidv4()}`;
-
     const generationRecord = {
       id: generationId,
       type: "motion",
@@ -2222,6 +2391,10 @@ app.post("/motion/generate", async (req, res) => {
 
     auditAiEvent(req, "ai_response", 200, {
       request_id: requestId,
+      step: "motion",
+      input_type: "text",
+      output_type: "image",
+      r2_url: videoUrl,
       session_id: sessionId,
       customer_id: customerId,
       model: KLING_MODEL,
@@ -2229,7 +2402,7 @@ app.post("/motion/generate", async (req, res) => {
       latency_ms: latencyMs,
       input_chars: (prompt || "").length,
       output_chars: outputChars,
-      detail: { generationId },
+      generation_id: generationId,
     });
 
     void upsertGenerationRow({
@@ -2244,7 +2417,12 @@ app.post("/motion/generate", async (req, res) => {
       inputChars: (prompt || "").length,
       outputChars,
       latencyMs,
-      detail: {
+      meta: {
+        requestId,
+        step: "motion",
+        input_type: "text",
+        output_type: "image",
+        r2_url: videoUrl,
         customerId,
         platform,
         durationSeconds,
@@ -2286,10 +2464,34 @@ app.post("/motion/generate", async (req, res) => {
     console.error("Error in /motion/generate:", err);
     auditAiEvent(req, "ai_error", 500, {
       request_id: requestId,
+      step: "motion",
+      input_type: "text",
+      output_type: "image",
       model: KLING_MODEL,
       provider: "replicate",
       latency_ms: Date.now() - startedAt,
+      generation_id: generationId,
       detail: { error: err?.message },
+    });
+
+    void upsertGenerationRow({
+      id: generationId,
+      requestId,
+      sessionId: req.body?.sessionId || null,
+      userId: req.user?.userId,
+      email: req.user?.email,
+      model: KLING_MODEL,
+      provider: "replicate",
+      status: "failed",
+      latencyMs: Date.now() - startedAt,
+      meta: {
+        requestId,
+        step: "motion",
+        input_type: "text",
+        output_type: "image",
+        customerId: req.body?.customerId || null,
+        error: err?.message,
+      },
     });
     res.status(500).json({
       ok: false,
