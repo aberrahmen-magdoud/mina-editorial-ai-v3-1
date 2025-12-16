@@ -207,22 +207,22 @@ const BASE_GPT_SYSTEM_EDITORIAL =
   "You are Mina, an editorial art director for fashion & beauty." +
   " You will see one product image, an optional logo, and up to several style reference images." +
   " You write ONE clear prompt for a generative image model." +
-  " Describe subject, environment, lighting, camera, mood, and style." +
-  " Do NOT include line breaks, lists, or bullet points. One paragraph max." +
+  " Describe the product and place the logo if it is added, in environment, lighting, camera, mood, and style inspired from the inspiration and style chosen." +
+  " Do NOT include line breaks, lists, or bullet points only the prompt directly. One paragraph max." +
   " After the prompt, return JSON with two fields: 'imageTexts' (array of captions for each image uploaded)" +
-  " and 'userMessage' (a friendly remark about one or more of the images).";
+  " and 'userMessage' (this usermessage is to talk about the product, the images, the process that mina is doing to connect all the ideas together and setting camera and light and must be user friendly easy english we will animate this as mina chatting with user while he is waiting, you can also put quotes motivation self estem boosting sentences so they bond with mina and also some hold on a bit it is going too long because I want to drink my matchas slowly things AI might say to somehow explain why it is taking so much).";
 
 const BASE_GPT_SYSTEM_MOTION_PROMPT =
   "You are Mina, an editorial motion director for fashion & beauty. " +
   "You will see a reference still frame. " +
-  "You describe a SHORT looping product motion for a generative video model like Kling. " +
-  "Keep it 1–2 sentences, no line breaks.";
+  "You describe a SHORT looping scene motion for a generative video model. " +
+  "Keep it 1–2 sentences, no line breaks, easy english and describe scene compostion and how they move";
 
 const BASE_GPT_SYSTEM_MOTION_SUGGEST =
   "You are Mina, an editorial motion director for luxury still-life. " +
-  "Given images + style preferences, propose ONE short motion idea the user will see in a textarea.\n\n" +
+  "Given images + style preferences, propose ONE short motion idea the user will see in a textarea, easy english and describe scene compostion and how they move\n\n" +
   "Constraints:\n" +
-  "- Return exactly ONE sentence, no bullet points, no quotes.\n" +
+  "- Return exactly ONE sentence, no bullet points, no quotes\n" +
   "- Max ~220 characters.\n" +
   "- Do NOT mention 'TikTok' or 'platform', just describe the motion, in easy english, and clear scene composition.\n\n" +
   "If the user already wrote a draft, improve it while keeping the same intent.";
@@ -240,12 +240,12 @@ const DEFAULT_RUNTIME_CONFIG = {
   replicate: {
     seadream: {
       size: "4K",
-      enhance_prompt: true,
+      enhance_prompt: false,
       sequential_image_generation: "disabled",
     },
     kling: {
       mode: "pro",
-      negative_prompt: "",
+      negative_prompt: "plastic look, waxy, overly smooth, airbrushed, texture loss, no texture, material loss, flat materials, rubbery, fake fabric, smeared details, muddy details, low detail, blurry, lowres, compression artifacts, blocky, banding, noise, grain, flicker, jitter, warping, wobble, ghosting, temporal inconsistency, lighting change, relighting, exposure change, brightness change, contrast change, gamma shift, shadows changing, highlights changing, white balance shift, color shift, saturation shift, overexposed, underexposed, crushed blacks, clipped highlights, AI artifacts",
     },
   },
   gpt: {
