@@ -23,7 +23,7 @@ import {
 
 import { parseDataUrl } from "./r2.js";
 
-import { logAdminAction } from "./supabase.js";
+import { logAdminAction, upsertSessionRow } from "./supabase.js";
 import { requireAdmin } from "./auth.js";
 
 const app = express();
@@ -31,13 +31,12 @@ const PORT = process.env.PORT || 3000;
 const MINA_BASELINE_USERS = 3651; // offset we add on top of DB users
 
 // ======================================================
-// Supabase (service role) — used for business persistence
-// Tables (per your schema visualizer):
-// - customers (shopify_customer_id PK)
-// - credit_transactions (id uuid PK)
-// - sessions (id uuid PK)
-// - generations (id text PK)
-// - feedback (id uuid PK)
+// Supabase (service role) — MEGA-first persistence
+// Tables (MEGA-only):
+// - mega_customers
+// - mega_generations
+// - mega_admin
+// Legacy tables are no longer written.
 // ======================================================
 const SUPABASE_URL = process.env.SUPABASE_URL || "";
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
@@ -783,6 +782,13 @@ function auditAiEvent(req, action, status, detail = {}) {
 
 function persistSessionHash(req, token, userId, email) {
   if (!token) return;
+  void upsertSessionRow({
+    userId,
+    email,
+    token,
+    ip: req?.ip,
+    userAgent: req?.get ? req.get("user-agent") : null,
+  });
 }
 
 // ======================================================
@@ -2090,7 +2096,7 @@ app.get("/admin/summary", requireAdmin, async (_req, res) => {
 
     const totalCustomers = await sbCountCustomers();
 
-    // Sum credits + autoTopup enabled (best-effort; limited scan)
+    // Sum credits + autoTopup enabled from MEGA_CUSTOMERS (best-effort; limited scan)
     let totalCredits = 0;
     let autoTopupOn = 0;
 
@@ -2100,16 +2106,16 @@ app.get("/admin/summary", requireAdmin, async (_req, res) => {
     while (from < hardCap) {
       const to = from + pageSize - 1;
       const { data, error } = await supabaseAdmin
-        .from("customers")
-        .select("credits,meta")
+        .from("mega_customers")
+        .select("mg_credits,mg_meta")
         .range(from, to);
 
       if (error) throw error;
       if (!data || data.length === 0) break;
 
       for (const row of data) {
-        totalCredits += Number(row.credits || 0);
-        const enabled = row?.meta?.autoTopup?.enabled;
+        totalCredits += Number(row.mg_credits || 0);
+        const enabled = row?.mg_meta?.autoTopup?.enabled;
         if (enabled === true) autoTopupOn += 1;
       }
 
@@ -2121,7 +2127,7 @@ app.get("/admin/summary", requireAdmin, async (_req, res) => {
       totalCustomers: totalCustomers ?? 0,
       totalCredits,
       autoTopupOn,
-      source: "supabase",
+      source: "mega_customers",
       note: totalCustomers > 20000 ? "summary capped to 20k customers for sum/autoTopup count" : undefined,
     });
   } catch (err) {
