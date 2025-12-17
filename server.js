@@ -2191,7 +2191,7 @@ app.get("/me", async (req, res) => {
         mg_disabled: false,
 
         mg_meta: shouldGrantWelcome
-          ? { ...meta, welcome_free_grant_v1: true, welcome_free_grant_at: createdAt提醒 }
+          ? { ...meta, welcome_free_grant_v1: true, welcome_free_grant_at: createdAt }
           : meta,
 
         mg_created_at: createdAt,
