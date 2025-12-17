@@ -1878,31 +1878,7 @@ app.get("/health", (_req, res) => {
     supabase: sbEnabled(),
   });
 });
-app.get("/history", async (req, res) => {
-  try {
-    const customerId = String(req.query.customerId || "anonymous");
-    if (!sbEnabled()) {
-      return res.status(503).json({ error: "Supabase not available" });
-    }
 
-    const history = await sbGetCustomerHistory(customerId);
-
-    return res.json({
-      ok: true,
-      customerId,
-      generations: history?.generations || [],
-      feedbacks: history?.feedbacks || [],
-      credits: history?.credits || { balance: 0, history: [] },
-    });
-  } catch (e) {
-    console.error("GET /history failed:", e);
-    res.status(500).json({
-      ok: false,
-      error: "HISTORY_FAILED",
-      message: e?.message || String(e),
-    });
-  }
-});
 
 function getBearerToken(req) {
   const raw = String(req.headers.authorization || "");
@@ -2046,6 +2022,39 @@ app.post("/billing/settings", async (req, res) => {
   } catch (err) {
     console.error("POST /billing/settings error", err);
     res.status(500).json({ error: "Failed to save billing settings" });
+  }
+});
+// =======================
+// Customer history (generations + feedback + credits)
+// =======================
+app.get("/history", async (req, res) => {
+  try {
+    const customerIdRaw = req.query.customerId || "anonymous";
+    const customerId = String(customerIdRaw);
+
+    if (!sbEnabled()) {
+      return res.status(503).json({
+        ok: false,
+        error: "NO_SUPABASE",
+      });
+    }
+
+    const history = await sbGetCustomerHistory(customerId);
+
+    return res.json({
+      ok: true,
+      customerId,
+      generations: history?.generations || [],
+      feedbacks: history?.feedbacks || [],
+      credits: history?.credits || { balance: 0, history: [] },
+    });
+  } catch (err) {
+    console.error("GET /history error:", err);
+    return res.status(500).json({
+      ok: false,
+      error: "HISTORY_FAILED",
+      message: err?.message || "Failed to load history",
+    });
   }
 });
 
