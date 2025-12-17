@@ -2343,8 +2343,6 @@ app.get("/me", async (req, res) => {
   }
 });
 
-
-
 // Billing settings (stored in customers.meta.autoTopup)
 app.get("/billing/settings", async (req, res) => {
   try {
@@ -3787,4 +3785,3 @@ app.post("/api/r2/store-remote-signed", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Mina Editorial AI API listening on port ${PORT}`);
 });
-
