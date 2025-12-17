@@ -1873,6 +1873,52 @@ app.get("/health", (_req, res) => {
     supabase: sbEnabled(),
   });
 });
+function getBearerToken(req) {
+  const h = req.headers.authorization || "";
+  const m = String(h).match(/^Bearer\s+(.+)$/i);
+  return m ? m[1].trim() : null;
+}
+
+app.get("/me", async (req, res) => {
+  try {
+    const token = getBearerToken(req);
+
+    // If no token, treat as logged out (don’t 401 spam the app)
+    if (!token) {
+      return res.json({ ok: true, user: null, isAdmin: false });
+    }
+
+    if (!supabaseAdmin) {
+      return res.status(503).json({ ok: false, error: "NO_SUPABASE" });
+    }
+
+    const { data, error } = await supabaseAdmin.auth.getUser(token);
+    if (error || !data?.user) {
+      return res.status(401).json({ ok: false, error: "INVALID_TOKEN" });
+    }
+
+    const email = (data.user.email || "").toLowerCase();
+    const userId = data.user.id;
+
+    // optional: check allowlist admin flag from mega_customers
+    const { data: customer } = await supabaseAdmin
+      .from("mega_customers")
+      .select("mg_admin_allowlist")
+      .or(`mg_user_id.eq.${userId},mg_email.eq.${email}`)
+      .limit(1)
+      .maybeSingle();
+
+    return res.json({
+      ok: true,
+      user: { id: userId, email },
+      isAdmin: !!customer?.mg_admin_allowlist,
+    });
+  } catch (e) {
+    return res
+      .status(500)
+      .json({ ok: false, error: "ME_FAILED", message: e?.message || String(e) });
+  }
+});
 
 app.get("/", (_req, res) => {
   res.json({
