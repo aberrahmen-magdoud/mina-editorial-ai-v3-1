@@ -2118,7 +2118,7 @@ function getBearerToken(req) {
 // =======================
 // REPLACE your whole /me route with this
 // =======================
-const crypto = require("crypto");
+
 
 function nowIso() {
   return new Date().toISOString();
