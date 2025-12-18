@@ -1219,9 +1219,8 @@ async function sbGetAdminOverview() {
 // Express setup
 // ======================================================
 const defaultAllowlist = [
+  "http://mina.faltastudio.com",
   "https://mina-app-bvpn.onrender.com",
-  "http://localhost:5173",
-  "http://localhost:3000",
 ];
 
 const envAllowlist = (process.env.CORS_ORIGINS || "")
