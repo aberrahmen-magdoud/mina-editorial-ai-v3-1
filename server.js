@@ -2440,6 +2440,11 @@ app.get("/credits/balance", async (req, res) => {
     const customerIdRaw = req.query.customerId || "anonymous";
     const customerId = String(customerIdRaw);
 
+    // ✅ Costs should always reflect runtime config (even if SB is off)
+    const cfg = await getRuntimeConfig();
+    const imageCost = Number(cfg?.credits?.imageCost ?? IMAGE_CREDITS_COST);
+    const motionCost = Number(cfg?.credits?.motionCost ?? MOTION_CREDITS_COST);
+
     if (!sbEnabled()) {
       return res.json({
         ok: false,
@@ -2447,7 +2452,7 @@ app.get("/credits/balance", async (req, res) => {
         customerId,
         balance: null,
         historyLength: null,
-        meta: { imageCost: IMAGE_CREDITS_COST, motionCost: MOTION_CREDITS_COST },
+        meta: { imageCost, motionCost },
         message: "Supabase not configured",
         passId: null,
       });
@@ -2466,7 +2471,7 @@ app.get("/credits/balance", async (req, res) => {
       customerId,
       balance: rec.balance,
       historyLength: rec.historyLength,
-      meta: { imageCost: IMAGE_CREDITS_COST, motionCost: MOTION_CREDITS_COST },
+      meta: { imageCost, motionCost }, // ✅ runtime config
       source: rec.source,
       passId,
     });
@@ -3130,6 +3135,8 @@ app.post("/motion/suggest", async (req, res) => {
     }
 
     const body = req.body || {};
+    const cfg = await getRuntimeConfig();
+    const gptModel = cfg?.models?.gpt || "gpt-4.1-mini";
     const referenceImageUrl = safeString(body.referenceImageUrl);
 
     if (!referenceImageUrl) {
@@ -3138,7 +3145,7 @@ app.post("/motion/suggest", async (req, res) => {
         step: "caption",
         input_type: "image",
         output_type: "text",
-        model: "gpt-4.1-mini",
+        model: gptModel,
         provider: "openai",
         generation_id: generationId,
         detail: { reason: "missing_reference_image" },
@@ -3191,7 +3198,7 @@ app.post("/motion/suggest", async (req, res) => {
       output_type: "text",
       session_id: normalizeSessionUuid(body.sessionId) || null,
       customer_id: customerId,
-      model: "gpt-4.1-mini",
+      model: gptModel,
       provider: "openai",
       input_chars: JSON.stringify(body || {}).length,
       generation_id: generationId,
@@ -3236,7 +3243,7 @@ app.post("/motion/suggest", async (req, res) => {
       output_type: "text",
       session_id: normalizeSessionUuid(body.sessionId) || null,
       customer_id: customerId,
-      model: "gpt-4.1-mini",
+      model: gptModel,
       provider: "openai",
       latency_ms: latencyMs,
       input_chars: JSON.stringify(body || {}).length,
@@ -3262,7 +3269,7 @@ app.post("/motion/suggest", async (req, res) => {
       step: "caption",
       input_type: "image",
       output_type: "text",
-      model: "gpt-4.1-mini",
+      model: gptModel,
       provider: "openai",
       latency_ms: Date.now() - startedAt,
       generation_id: generationId,
