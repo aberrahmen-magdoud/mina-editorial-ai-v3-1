@@ -3021,13 +3021,7 @@ app.post("/editorial/generate", async (req, res) => {
       auth_user: req.user || null,
       header_pass_id: req.get("X-Mina-Pass-Id") || null,
     });
-    
-    const creditsInfo = await sbGetCredits({
-      customerId,
-      reqUserId: req?.user?.userId,
-      reqEmail: req?.user?.email,
-    });
-
+  
     const creditsInfo = await sbGetCredits({
       customerId,
       reqUserId: req?.user?.userId,
