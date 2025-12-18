@@ -40,16 +40,29 @@ function defaultFreeCredits() {
   return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0;
 }
 
-// Optional: set expires_at when adding credits (only if you set env var)
+// Credits expiry policy (rolling; latest wins)
+// - Defaults to 30 days if env missing/invalid
+// - Any positive credit grant extends expiry to max(current, event_time + N days)
 function creditsExpireDays() {
-  const n = Number(process.env.CREDITS_EXPIRE_DAYS || 0);
-  return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0;
+  const n = Number(process.env.CREDITS_EXPIRE_DAYS);
+  if (Number.isFinite(n) && n > 0) return Math.max(1, Math.floor(n));
+  return 30;
 }
 
-function addDaysIso(days) {
-  const d = new Date();
-  d.setDate(d.getDate() + days);
-  return d.toISOString();
+function addDaysIso(baseIso, days) {
+  const baseMs = Date.parse(String(baseIso || ""));
+  if (!Number.isFinite(baseMs)) return null;
+  const ms = baseMs + Number(days) * 24 * 60 * 60 * 1000;
+  return new Date(ms).toISOString();
+}
+
+function maxIso(aIso, bIso) {
+  const a = Date.parse(String(aIso || ""));
+  const b = Date.parse(String(bIso || ""));
+  if (!Number.isFinite(a) && !Number.isFinite(b)) return null;
+  if (!Number.isFinite(a)) return bIso || null;
+  if (!Number.isFinite(b)) return aIso || null;
+  return a >= b ? (aIso || null) : (bIso || null);
 }
 
 /**
@@ -127,6 +140,10 @@ export async function megaEnsureCustomer(
     const passId = `pass_${crypto.randomUUID()}`;
     const startingCredits =
       Number.isFinite(Number(legacyCredits)) ? Number(legacyCredits) : defaultFreeCredits();
+    const ts = nowIso();
+    const expDays = creditsExpireDays();
+    const initialExpiry =
+      Math.floor(startingCredits || 0) > 0 ? addDaysIso(ts, expDays) : null;
 
     const payload = {
       mg_pass_id: passId,
@@ -144,8 +161,8 @@ export async function megaEnsureCustomer(
       mg_product_updates_opt_in: incomingProductUpdatesOptIn === null ? false : incomingProductUpdatesOptIn,
 
       mg_credits: Math.floor(startingCredits || 0),
-      mg_expires_at: null,
-      mg_last_active: nowIso(),
+      mg_expires_at: initialExpiry,
+      mg_last_active: ts,
 
       mg_disabled: false,
 
@@ -159,8 +176,8 @@ export async function megaEnsureCustomer(
 
       mg_meta: profile.meta && typeof profile.meta === "object" ? profile.meta : {},
       mg_source_system: safeString(profile.sourceSystem || "app"),
-      mg_created_at: nowIso(),
-      mg_updated_at: nowIso(),
+      mg_created_at: ts,
+      mg_updated_at: ts,
     };
 
     const { error: insErr } = await supabaseAdmin.from("mega_customers").insert(payload);
@@ -171,12 +188,22 @@ export async function megaEnsureCustomer(
       credits: payload.mg_credits,
       shopifyCustomerId: payload.mg_shopify_customer_id,
       meta: payload.mg_meta || {},
+      expiresAt: payload.mg_expires_at,
     };
   }
 
   // Update existing (fill missing fields + refresh last_active)
   const passId = existing.mg_pass_id;
   const updates = {};
+
+  // Repair: if credits exist but expiry is missing, backfill to (created_at + 30d)
+  const expDays = creditsExpireDays();
+  const existingCredits = Number(existing.mg_credits || 0);
+
+  if (existingCredits > 0 && !existing.mg_expires_at) {
+    const base = existing.mg_created_at || nowIso();
+    updates.mg_expires_at = addDaysIso(base, expDays);
+  }
 
   // If we learned a better key, attach it (don’t overwrite real id with "anonymous")
   if (isRealCustomerKey(shopifyCustomerId) && !isRealCustomerKey(existing.mg_shopify_customer_id)) {
@@ -227,6 +254,7 @@ export async function megaEnsureCustomer(
     credits: Number(existing.mg_credits || 0),
     shopifyCustomerId: existing.mg_shopify_customer_id || shopifyCustomerId,
     meta: existing.mg_meta || {},
+    expiresAt: existing.mg_expires_at || updates.mg_expires_at || null,
   };
 }
 
@@ -297,10 +325,22 @@ export async function megaWriteCreditTxnEvent(
     updates.mg_credits = Math.floor((cust.credits || 0) + Number(delta || 0));
   }
 
-  // Optional expiry extension if configured
+  // Rolling expiry: any positive credit grant extends expiry to max(current, ts + N days)
   const expDays = creditsExpireDays();
-  if (expDays > 0 && Number(delta || 0) > 0) {
-    updates.mg_expires_at = addDaysIso(expDays);
+  const d = Number(delta || 0);
+
+  if (d > 0) {
+    const desired = addDaysIso(ts, expDays);
+    const current = cust?.expiresAt || null; // from megaEnsureCustomer return
+    const nextExp = maxIso(current, desired);
+    if (nextExp) updates.mg_expires_at = nextExp;
+  } else {
+    // Backfill safety: if user still has credits but expiry missing, set one
+    const nextCredits = Number(updates.mg_credits || 0);
+    if (nextCredits > 0 && !cust?.expiresAt) {
+      const desired = addDaysIso(ts, expDays);
+      if (desired) updates.mg_expires_at = desired;
+    }
   }
 
   const { error: upErr } = await supabaseAdmin
