@@ -16,6 +16,9 @@ import crypto from "node:crypto";
 import multer from "multer";
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import { createClient } from "@supabase/supabase-js";
+import { normalizeError } from "./server/logging/normalizeError.js";
+import { logError } from "./server/logging/logError.js";
+import { errorMiddleware } from "./server/logging/errorMiddleware.js";
 import {
   megaEnsureCustomer,
   megaWriteSessionEvent,
@@ -34,6 +37,38 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 // SubPart: We show total users with a friendly offset so numbers look nicer.
 const MINA_BASELINE_USERS = 3651; // offset we add on top of DB users
+
+process.on("unhandledRejection", async (reason) => {
+  const normalized = normalizeError(reason);
+  try {
+    await logError({
+      action: "process.unhandledRejection",
+      status: 500,
+      message: normalized.message,
+      stack: normalized.stack,
+      emoji: "🧵",
+      code: "UNHANDLED_REJECTION",
+    });
+  } catch (err) {
+    console.error("[process.unhandledRejection] failed to log", err);
+  }
+});
+
+process.on("uncaughtException", async (err) => {
+  const normalized = normalizeError(err);
+  try {
+    await logError({
+      action: "process.uncaughtException",
+      status: 500,
+      message: normalized.message,
+      stack: normalized.stack,
+      emoji: "💥",
+      code: "UNCAUGHT_EXCEPTION",
+    });
+  } catch (loggingError) {
+    console.error("[process.uncaughtException] failed to log", loggingError);
+  }
+});
 // ✅ Put it RIGHT HERE (before supabase init / routes)
 console.log("ENV CHECK", {
   SUPABASE_URL_set: !!process.env.SUPABASE_URL,
@@ -1108,10 +1143,18 @@ async function sbGetAdminOverview() {
 // ======================================================
 // Express setup
 // ======================================================
-const allowlist = (process.env.CORS_ORIGINS || "")
+const defaultAllowlist = [
+  "https://mina-app-bvpn.onrender.com",
+  "http://localhost:5173",
+  "http://localhost:3000",
+];
+
+const envAllowlist = (process.env.CORS_ORIGINS || "")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
+
+const allowlist = Array.from(new Set([...defaultAllowlist, ...envAllowlist]));
 
 const corsOptions = {
   origin: (origin, cb) => {
@@ -1346,6 +1389,33 @@ app.post(
 
 app.use(express.json({ limit: "25mb" }));
 app.use(express.urlencoded({ extended: true, limit: "25mb" }));
+
+app.post("/api/log-error", async (req, res) => {
+  try {
+    const body = req.body || {};
+
+    await logError({
+      action: "frontend.error",
+      status: 500,
+      route: body.url || "/(frontend)",
+      method: "FRONTEND",
+      message: body.message || "Frontend crash",
+      stack: body.stack,
+      userAgent: body.userAgent || req.get("user-agent"),
+      ip: req.headers["x-forwarded-for"] || req.ip,
+      userId: body.userId,
+      email: body.email,
+      emoji: "🖥️",
+      code: "FRONTEND_CRASH",
+      detail: { ...(body.extra || {}) },
+      sourceSystem: "mina-frontend",
+    });
+  } catch (err) {
+    console.error("[POST /api/log-error] failed to record", err);
+  }
+
+  res.json({ ok: true });
+});
 
 // Replicate (SeaDream + Kling)
 const replicate = new Replicate({
@@ -3808,6 +3878,8 @@ app.post("/api/r2/store-remote-signed", async (req, res) => {
 // =======================
 // Start server
 // =======================
+app.use(errorMiddleware);
+
 app.listen(PORT, () => {
   console.log(`Mina Editorial AI API listening on port ${PORT}`);
 });
