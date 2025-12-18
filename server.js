@@ -2506,11 +2506,19 @@ app.get("/me", async (req, res) => {
     });
   } catch (e) {
     console.error("GET /me failed", e);
-    return res.status(500).json({
-      ok: false,
-      error: "ME_FAILED",
-      message: e?.message || String(e),
+    // ✅ Never break the frontend boot with a 500.
+    // If Supabase/Auth has a hiccup, treat as anonymous and still return a passId.
+    const incomingPassId = String(req.get("X-Mina-Pass-Id") || "").trim() || null;
+    const fallbackPassId = incomingPassId || crypto.randomUUID();
+
+    return res.status(200).json({
+      ok: true,
+      user: null,
+      isAdmin: false,
+      passId: fallbackPassId,
       requestId,
+      degraded: true,
+      degradedReason: e?.message || String(e),
     });
   }
 });
