@@ -1,3 +1,7 @@
+// Hero Part 1: Mina Editorial AI API brain (Supabase-first, no Prisma)
+// Part 1.1: Express wiring, storage helpers, and AI clients live here.
+// Part 1.1.1: Read these numbered crumbs to skim responsibilities without
+// opening every function.
 // server.js (Supabase-first, no Prisma)
 // Mina Editorial AI API
 "use strict";
@@ -28,19 +32,21 @@ import { requireAdmin } from "./auth.js";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+// SubPart: We show total users with a friendly offset so numbers look nicer.
 const MINA_BASELINE_USERS = 3651; // offset we add on top of DB users
 
-// ======================================================
-// Supabase (service role) — MEGA-first persistence
-// Tables (MEGA-only):
-// - mega_customers
-// - mega_generations
-// - mega_admin
-// Legacy tables are no longer written.
+// Part 1.2: Supabase (service role) — MEGA-first persistence
+// Part 1.2.1: Tables (MEGA-only)
+//   - mega_customers
+//   - mega_generations
+//   - mega_admin
+// Part 1.2.2: Legacy tables are no longer written, so new writes stay clean.
 // ======================================================
 const SUPABASE_URL = process.env.SUPABASE_URL || "";
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 
+// Part: Supabase service client (used for all database writes)
+// SubPart: we only construct it when env vars are present so local dev can still boot.
 const supabaseAdmin =
   SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
     ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
@@ -48,14 +54,17 @@ const supabaseAdmin =
       })
     : null;
 
+// SubPart: quick boolean to avoid repeating null checks everywhere.
 function sbEnabled() {
   return !!supabaseAdmin;
 }
 
+// SubPart: consistent timestamp helper for DB writes and logs.
 function nowIso() {
   return new Date().toISOString();
 }
 
+// SubPart: guardrail to avoid writing undefined/null into the DB.
 function safeString(value, fallback = "") {
   if (value === null || value === undefined) return fallback;
   if (typeof value !== "string") return String(value);
@@ -63,11 +72,13 @@ function safeString(value, fallback = "") {
   return trimmed.length ? trimmed : fallback;
 }
 
+// SubPart: normalize Shopify IDs so anonymous users are clearly labeled.
 function safeShopifyId(customerIdRaw) {
   const v = customerIdRaw === null || customerIdRaw === undefined ? "" : String(customerIdRaw);
   return v.trim() || "anonymous";
 }
 
+// SubPart: simple UUID format check to keep session ids tidy.
 function isUuid(v) {
   return typeof v === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
 }
@@ -92,9 +103,9 @@ function isHttpUrl(u) {
   }
 }
 
-// ======================================================
-// R2 setup (Cloudflare R2 = S3 compatible)
-// ======================================================
+// Hero Part 2: File uploads to Cloudflare R2 (S3 compatible)
+// Part 2.1: Build a tiny R2 client and a Multer uploader so API routes can stash files.
+// Part 2.1.1: Safe naming helpers prevent weird characters from breaking object keys.
 const R2_ACCOUNT_ID = process.env.R2_ACCOUNT_ID;
 const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID;
 const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY;
@@ -135,9 +146,9 @@ function guessExtFromContentType(contentType = "") {
   if (ct.includes("mp4")) return "mp4";
   return "";
 }
-// =======================
-// GPT I/O capture helpers (store what we send to OpenAI + what we get back)
-// =======================
+// Hero Part 3: GPT input/output summaries
+// Part 3.1: Helpers keep a small, friendly snapshot of prompts/responses for auditing.
+// Part 3.1.1: Truncation avoids storing giant payloads while still telling the story.
 function truncateStr(s, max = 4000) {
   if (typeof s !== "string") return "";
   if (s.length <= max) return s;
@@ -184,8 +195,9 @@ function makeGptIOInput({ model, systemMessage, userContent, temperature, maxTok
   };
 }
 
-// =======================
-// R2 PUBLIC (non-expiring) helpers
+// Part 2.2: R2 PUBLIC (non-expiring) helpers
+// Part 2.2.1: Converts signed temp URLs into permanent, shareable URLs when possible.
+// Part 2.2.2: Guards against missing public domain config so uploads never break later.
 // =======================
 const R2_PUBLIC_BASE_URL = (process.env.R2_PUBLIC_BASE_URL || "").replace(/\/+$/, ""); // e.g. https://assets.faltastudio.com
 
@@ -338,8 +350,9 @@ function getRequestMeta(req) {
     method: req.method,
   };
 }
-// ======================================================
-// Runtime Config (stored in Supabase, applied live)
+// Hero Part 4: Runtime Config (stored in Supabase, applied live)
+// Part 4.1: Baseline GPT prompts act as defaults the DB can override.
+// Part 4.2: Model + credit costs can be tweaked without redeploying.
 // ======================================================
 
 // ✅ Base GPT system prompts (your current hardcoded text) — used as DEFAULTS
