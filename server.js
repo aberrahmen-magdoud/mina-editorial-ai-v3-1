@@ -32,6 +32,7 @@ import { parseDataUrl } from "./r2.js";
 
 import { logAdminAction, upsertSessionRow } from "./supabase.js";
 import { requireAdmin } from "./auth.js";
+import mmaRouter from "./server/mma/mma-router.js";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -4004,6 +4005,9 @@ app.post("/api/r2/store-remote-signed", async (req, res) => {
     });
   }
 });
+
+// Hero Part MMA: Mina Mind API router
+app.use("/mma", mmaRouter);
 
 
 // =======================
