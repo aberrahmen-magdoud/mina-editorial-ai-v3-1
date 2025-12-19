@@ -1518,18 +1518,12 @@ const MOTION_CREDITS_COST = Number(process.env.MOTION_CREDITS_COST || 5);
 // ======================================================
 const STYLE_PRESETS = {
   vintage: {
-    name: "Vintage",
+    name: "Style 1",
     profile: {
       keywords: [
         "editorial-still-life",
-        "film-grain-texture",
         "muted-color-palette",
         "soft-contrast",
-        "gentle-vignette",
-        "studio-tabletop",
-        "smooth-clean-backdrop",
-        "subtle-flash-highlights",
-        "timeless-magazine-look",
       ],
       description:
         "editorial still life with a luxurious, magazine-era feel. Clean compositions, smooth backgrounds, and muted tones with gentle contrast. Subtle grain and soft highlights give a timeless, refined look while keeping the scene minimal and polished. no frames",
@@ -1538,40 +1532,30 @@ const STYLE_PRESETS = {
   },
 
   gradient: {
-    name: "Gradient",
+    name: "Style 2",
     profile: {
       keywords: [
         "gradient-background",
         "midair-suspension",
         "luxury-editorial-still-life",
-        "minimal-composition",
-        "hyper-texture-detail",
-        "sculptural-subject",
-        "dramatic-rim-light",
-        "soft-vignette-falloff",
-        "crisp-specular-highlights",
       ],
       description:
-        "Minimal luxury still life shot against a smooth gradient backdrop, Editorial lighting with subtle rim/backlight and controlled shadows,hyper-detailed textures and sculptural forms.",
+        "Minimal luxury still life shot against a smooth gradient backdrop, Editorial lighting, hyper-detailed textures and sculptural forms.",
     },
     heroImageUrls: ["https://assets.faltastudio.com/Website%20Assets/Gradient%200.png"],
   },
 
-  "back-light": {
-    name: "Back Light",
+  back_light: {
+    name: "Style 3",
     profile: {
       keywords: [
         "luxury-editorial-still-life",
         "high-key-light-background",
         "backlit-translucency",
-        "glass-refractions",
-        "clean-specular-highlights",
-        "minimal-composition",
-        "soft-shadow-falloff",
-        "premium-studio-look",
+        "studio-shot",
       ],
       description:
-        "Luxurious editorial still life on a bright, minimal background. Clean studio lighting with glossy glass reflections and a strong backlight that reveals inner translucency and subtle texture, creating a premium, sculptural feel.",
+        "Luxurious editorial still life on a bright, minimal background. Clean studio, strong backlight that reveals inner translucency and subtle texture",
     },
     heroImageUrls: ["https://assets.faltastudio.com/Website%20Assets/Backlight.png"],
   },
