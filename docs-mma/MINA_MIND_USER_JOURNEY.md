@@ -87,53 +87,62 @@ This makes MINA both **personalized** and **debuggable**.
 
 ---
 
-## 4) Schema: end-to-end journey (Mermaid flow)
-
-```mermaid
 flowchart TD
-  A[User: Create Still] --> B{Has product image?}
-  B -- Yes --> B1[scan_product -> product_crt + scan line]
-  B -- No --> C{Has logo image?}
-  B1 --> C{Has logo image?}
-  C -- Yes --> C1[scan_logo -> logo_crt + scan line]
-  C -- No --> D{Has inspiration images?}
-  C1 --> D{Has inspiration images?}
-  D -- Yes --> D1[scan_inspiration -> inspiration_crt[] + scan lines]
-  D -- No --> E{Vision intelligence ON?}
-  D1 --> E{Vision intelligence ON?}
-  E -- Yes --> E1[like_history(window=5) -> style_history_csv]
-  E -- No --> E2[like_history(window=20) -> style_history_csv]
-  E1 --> F[gpt_reader -> clean_prompt + final userMessage]
-  E2 --> F[gpt_reader -> clean_prompt + final userMessage]
-  F --> G[seedream_generate -> still image]
-  G --> H[postscan_output_still -> output_still_crt]
-  H --> I[User: Tweak Still #1]
-  I --> J[gpt_feedback_still -> prompt]
-  J --> K[seedream_generate_feedback -> still image v2]
-  K --> L[postscan_output_still_feedback]
-  L --> M[User: Tweak Still #2]
-  M --> J2[gpt_feedback_still -> prompt]
-  J2 --> K2[seedream_generate_feedback -> still image v3]
-  K2 --> L2[postscan_output_still_feedback]
-  L2 --> N[User: Tweak Still #3]
-  N --> J3[gpt_feedback_still -> prompt]
-  J3 --> K3[seedream_generate_feedback -> still image v4]
-  K3 --> O[postscan_output_still_feedback]
-  O --> P[User: Animate this]
-  P --> Q[scan_input_still (if missing) -> still_crt + scan line]
-  Q --> R{Type for me ON?}
-  R -- Yes --> R1[motion_suggestion -> motion_sugg_prompt]
-  R -- No --> R2[gpt_reader_motion -> motion_prompt]
-  R1 --> S[kling_generate -> video v1]
-  R2 --> S[kling_generate -> video v1]
-  S --> T[User: Tweak Motion #1]
-  T --> U[gpt_feedback_motion -> motion prompt v2]
-  U --> V[kling_generate_feedback -> video v2]
-  V --> W[User: Like]
-  W --> X[mma_event: like]
-  X --> Y[User: Download]
-  Y --> Z[mma_event: download]
-```
+  A["User: Create Still"] --> B{"Has product image?"}
+  B -- Yes --> B1["scan_product → product_crt + scan line"]
+  B -- No --> C{"Has logo image?"}
+
+  B1 --> C{"Has logo image?"}
+  C -- Yes --> C1["scan_logo → logo_crt + scan line"]
+  C -- No --> D{"Has inspiration images?"}
+
+  C1 --> D{"Has inspiration images?"}
+  D -- Yes --> D1["scan_inspiration → inspiration_crt_list + scan lines"]
+  D -- No --> E{"Vision intelligence ON?"}
+
+  D1 --> E{"Vision intelligence ON?"}
+  E -- Yes --> E1["like_history (window=5) → style_history_csv"]
+  E -- No --> E2["like_history (window=20) → style_history_csv"]
+
+  E1 --> F["gpt_reader → clean_prompt + final userMessage"]
+  E2 --> F["gpt_reader → clean_prompt + final userMessage"]
+
+  F --> G["seedream_generate → still image"]
+  G --> H["postscan_output_still → output_still_crt"]
+
+  H --> I["User: Tweak Still #1"]
+  I --> J["gpt_feedback_still → prompt"]
+  J --> K["seedream_generate_feedback → still image v2"]
+  K --> L["postscan_output_still_feedback"]
+
+  L --> M["User: Tweak Still #2"]
+  M --> J2["gpt_feedback_still → prompt"]
+  J2 --> K2["seedream_generate_feedback → still image v3"]
+  K2 --> L2["postscan_output_still_feedback"]
+
+  L2 --> N["User: Tweak Still #3"]
+  N --> J3["gpt_feedback_still → prompt"]
+  J3 --> K3["seedream_generate_feedback → still image v4"]
+  K3 --> O["postscan_output_still_feedback"]
+
+  O --> P["User: Animate this"]
+  P --> Q["scan_input_still (if missing) → still_crt + scan line"]
+  Q --> R{"Type for me ON?"}
+
+  R -- Yes --> R1["motion_suggestion → motion_sugg_prompt"]
+  R -- No --> R2["gpt_reader_motion → motion_prompt"]
+
+  R1 --> S["kling_generate → video v1"]
+  R2 --> S["kling_generate → video v1"]
+
+  S --> T["User: Tweak Motion #1"]
+  T --> U["gpt_feedback_motion → motion prompt v2"]
+  U --> V["kling_generate_feedback → video v2"]
+
+  V --> W["User: Like"]
+  W --> X["mma_event: like"]
+  X --> Y["User: Download"]
+  Y --> Z["mma_event: download"]
 
 ---
 
