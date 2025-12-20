@@ -334,12 +334,16 @@ export async function megaWriteCreditTxnEvent(
     mg_last_active: nowIso(),
   };
 
-  if (Number.isFinite(Number(nextBalance))) {
-    updates.mg_credits = Math.floor(Number(nextBalance));
-  } else {
-    // fallback: add delta onto current value (best-effort)
-    updates.mg_credits = Math.floor((cust.credits || 0) + Number(delta || 0));
-  }
+  const hasNextBalance =
+  nextBalance !== null && nextBalance !== undefined && Number.isFinite(Number(nextBalance));
+
+if (hasNextBalance) {
+  updates.mg_credits = Math.floor(Number(nextBalance));
+} else {
+  // fallback: add delta onto current value (best-effort)
+  updates.mg_credits = Math.floor((cust.credits || 0) + Number(delta || 0));
+}
+
 
   // Optional expiry extension if configured
   const expDays = creditsExpireDays();
