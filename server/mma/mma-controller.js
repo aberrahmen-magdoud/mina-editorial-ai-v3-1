@@ -464,6 +464,7 @@ async function runProductionPipeline({ supabase, generationId, vars, mode, prefe
       stepNo: 1,
       stepType: mode === "video" ? "gpt_reader_motion" : "gpt_reader",
       payload: {
+        request: prompts.request, // ✅ system + user (context) + model
         input: {
           brief: working?.inputs?.brief || working?.inputs?.motionDescription || "",
           preferences,
