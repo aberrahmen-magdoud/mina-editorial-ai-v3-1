@@ -32,15 +32,61 @@ export function makeInitialVars({
   feedback = {},
   settings = {},
 } = {}) {
+  // Keep BOTH ids + urls (so pipeline can run without extra lookups)
+  const productUrl =
+    assets.productImageUrl || assets.product_image_url || assets.product_url || null;
+
+  const logoUrl =
+    assets.logoImageUrl || assets.logo_image_url || assets.logo_url || null;
+
+  const styleUrls =
+    assets.styleImageUrls ||
+    assets.style_image_urls ||
+    assets.inspiration_urls ||
+    [];
+
+  const klingUrls =
+    assets.kling_images ||
+    assets.klingImages ||
+    assets.kling_image_urls ||
+    [];
+
+  const startUrl =
+    assets.start_image_url || assets.startImageUrl || null;
+
+  const endUrl =
+    assets.end_image_url || assets.endImageUrl || null;
+
+  const brief =
+    inputs.brief ||
+    inputs.userBrief ||
+    inputs.prompt ||
+    "";
+
+  const motionDescription =
+    inputs.motion_description ||
+    inputs.motionDescription ||
+    inputs.motion_user_brief ||
+    "";
+
   return {
-    version: "2025-12-19",
+    version: "2025-12-21",
     mode,
     assets: {
+      // legacy ids (kept)
       product_image_id: assets.product_image_id || null,
       logo_image_id: assets.logo_image_id || null,
       inspiration_image_ids: assets.inspiration_image_ids || [],
       style_hero_image_id: assets.style_hero_image_id || null,
       input_still_image_id: assets.input_still_image_id || null,
+
+      // ✅ urls (NEW)
+      product_image_url: typeof productUrl === "string" ? productUrl : null,
+      logo_image_url: typeof logoUrl === "string" ? logoUrl : null,
+      style_image_urls: Array.isArray(styleUrls) ? styleUrls : [],
+      kling_image_urls: Array.isArray(klingUrls) ? klingUrls : [],
+      start_image_url: typeof startUrl === "string" ? startUrl : null,
+      end_image_url: typeof endUrl === "string" ? endUrl : null,
     },
     scans: {
       product_crt: null,
@@ -55,10 +101,19 @@ export function makeInitialVars({
       style_history_csv: history.style_history_csv || null,
     },
     inputs: {
+      // ✅ canonical fields your controller reads
+      brief,
+      motion_description: motionDescription,
+      motionDescription,
+
+      // keep your existing fields too
       userBrief: inputs.userBrief || "",
       style: inputs.style || "",
       motion_user_brief: inputs.motion_user_brief || "",
       movement_style: inputs.movement_style || "",
+
+      platform: inputs.platform || inputs.platformKey || "",
+      aspect_ratio: inputs.aspect_ratio || inputs.aspectRatio || "",
     },
     prompts: {
       clean_prompt: prompts.clean_prompt || null,

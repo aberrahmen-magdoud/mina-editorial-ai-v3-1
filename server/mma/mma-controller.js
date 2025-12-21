@@ -227,22 +227,40 @@ function buildSeedreamImageInputs(vars) {
     .slice(0, 10);
 }
 
-function getKlingFrames(vars) {
+function pickKlingImages(vars) {
   const assets = vars?.assets || {};
-  const arr = safeArray(assets.kling_images || assets.klingImages || assets.kling_image_urls);
-  const start = assets.start_image_url || assets.startImageUrl || arr[0] || assets.product_image_url || assets.productImageUrl || "";
-  const end = assets.end_image_url || assets.endImageUrl || arr[1] || "";
+  const arr = safeArray(assets.kling_image_urls || assets.klingImages || assets.kling_images);
 
   const clean = (url) => (typeof url === "string" && url.startsWith("http") ? url : "");
-  return { start: clean(start), end: clean(end) };
+
+  const start =
+    clean(assets.start_image_url || assets.startImageUrl) ||
+    clean(arr[0]) ||
+    clean(assets.product_image_url || assets.productImageUrl);
+
+  const end = clean(assets.end_image_url || assets.endImageUrl) || clean(arr[1]);
+
+  return { start: start || "", end: end || "" };
 }
 
-async function runSeedream({ prompt, aspectRatio, imageInputs = [] }) {
+async function runSeedream({
+  prompt,
+  aspectRatio,
+  imageInputs = [],
+  size,
+  enhancePrompt,
+  input: forcedInput,
+}) {
   const replicate = getReplicate();
 
-  const size = process.env.MMA_SEADREAM_SIZE || "2K";
+  const sizeValue = size || process.env.MMA_SEADREAM_SIZE || "2K";
   const enhancePromptRaw = process.env.MMA_SEADREAM_ENHANCE_PROMPT;
-  const enhance_prompt = enhancePromptRaw === undefined ? true : String(enhancePromptRaw).toLowerCase() === "true";
+  const enhance_prompt =
+    enhancePrompt !== undefined
+      ? enhancePrompt
+      : enhancePromptRaw === undefined
+        ? true
+        : String(enhancePromptRaw).toLowerCase() === "true";
 
   const defaultAspect = process.env.MMA_SEADREAM_ASPECT_RATIO || "match_input_image";
   const version =
@@ -259,15 +277,24 @@ async function runSeedream({ prompt, aspectRatio, imageInputs = [] }) {
     ? imageInputs.filter((u) => typeof u === "string" && u.startsWith("http")).slice(0, 10)
     : [];
 
-  const input = {
-    prompt: finalPrompt,
-    size,
-    aspect_ratio: aspectRatio || defaultAspect,
-    enhance_prompt,
-    sequential_image_generation: "disabled",
-    max_images: 1,
-    image_input: cleanedInputs,
-  };
+  const input = forcedInput
+    ? { ...forcedInput, prompt: forcedInput.prompt || finalPrompt }
+    : {
+        prompt: finalPrompt,
+        size: sizeValue,
+        aspect_ratio: aspectRatio || defaultAspect,
+        enhance_prompt,
+        sequential_image_generation: "disabled",
+        max_images: 1,
+        ...(cleanedInputs.length ? { image_input: cleanedInputs } : {}),
+      };
+
+  if (!input.aspect_ratio) input.aspect_ratio = aspectRatio || defaultAspect;
+  if (!input.size) input.size = sizeValue;
+  if (input.enhance_prompt === undefined) input.enhance_prompt = enhance_prompt;
+  if (!input.sequential_image_generation) input.sequential_image_generation = "disabled";
+  if (!input.max_images) input.max_images = 1;
+  if (!input.image_input && cleanedInputs.length) input.image_input = cleanedInputs;
 
   const t0 = Date.now();
   const out = await replicate.run(version, { input });
@@ -283,27 +310,37 @@ async function runSeedream({ prompt, aspectRatio, imageInputs = [] }) {
   };
 }
 
-async function runKling({ prompt, startImage, endImage }) {
+async function runKling({ prompt, startImage, endImage, mode, duration, negativePrompt, input: forcedInput }) {
   const replicate = getReplicate();
 
-  const duration = Number(process.env.MMA_KLING_DURATION || 5);
+  const defaultDuration = Number(duration ?? process.env.MMA_KLING_DURATION ?? 5);
   const version = process.env.MMA_KLING_VERSION || process.env.MMA_KLING_MODEL_VERSION || "kwaivgi/kling-v2.1";
 
-  const neg =
+  const envNeg =
     process.env.NEGATIVE_PROMPT_KLING ||
     process.env.MMA_NEGATIVE_PROMPT_KLING ||
     "";
 
-  const mode = endImage ? "pro" : process.env.MMA_KLING_MODE || "standard";
+  const finalPrompt = forcedInput?.prompt || prompt;
+  const finalNeg = negativePrompt !== undefined ? negativePrompt : envNeg;
+  const providedEnd = forcedInput?.end_image || endImage;
 
-  const input = {
-    mode,
-    prompt,
-    duration,
-    start_image: startImage,
-    ...(endImage ? { end_image: endImage } : {}),
-    ...(neg ? { negative_prompt: neg } : {}),
-  };
+  const input = forcedInput
+    ? { ...forcedInput }
+    : {
+        mode: providedEnd ? "pro" : mode || process.env.MMA_KLING_MODE || "standard",
+        prompt: finalPrompt,
+        duration: defaultDuration,
+        start_image: startImage,
+        ...(providedEnd ? { end_image: providedEnd } : {}),
+      };
+
+  if (finalNeg && !input.negative_prompt) input.negative_prompt = finalNeg;
+  if (!input.prompt) input.prompt = finalPrompt;
+  input.duration = Number(input.duration ?? defaultDuration) || defaultDuration;
+  if (!input.mode) input.mode = providedEnd ? "pro" : mode || process.env.MMA_KLING_MODE || "standard";
+  if (!input.start_image && startImage) input.start_image = startImage;
+  if (!input.end_image && providedEnd) input.end_image = providedEnd;
 
   const t0 = Date.now();
   const out = await replicate.run(version, { input });
@@ -311,7 +348,7 @@ async function runKling({ prompt, startImage, endImage }) {
   return {
     input,
     out,
-    usedEnd: !!endImage,
+    usedEnd: !!input.end_image,
     timing: {
       started_at: new Date(t0).toISOString(),
       ended_at: nowIso(),
@@ -448,11 +485,18 @@ async function runProductionPipeline({ supabase, generationId, vars, mode, prefe
       if (!usedPrompt) throw new Error("EMPTY_PROMPT");
 
       const imageInputs = buildSeedreamImageInputs(working);
+      const aspect_ratio =
+        working?.inputs?.aspect_ratio ||
+        cfg.seadream.aspectRatio ||
+        process.env.MMA_SEADREAM_ASPECT_RATIO ||
+        "match_input_image";
 
       const { input, out, timing } = await runSeedream({
         prompt: usedPrompt,
-        aspectRatio: working?.inputs?.aspect_ratio || "",
+        aspectRatio: aspect_ratio,
         imageInputs,
+        size: cfg.seadream.size,
+        enhancePrompt: cfg.seadream.enhancePrompt,
       });
       const url = pickFirstUrl(out);
       if (!url) throw new Error("SEADREAM_NO_URL");
@@ -477,13 +521,32 @@ async function runProductionPipeline({ supabase, generationId, vars, mode, prefe
       usedPrompt = working.prompts.motion_prompt || "";
       if (!usedPrompt) throw new Error("EMPTY_PROMPT");
 
-      const { start, end } = getKlingFrames(working);
-      if (!start) throw new Error("MISSING_START_IMAGE");
+      const { start, end } = pickKlingImages(working);
+      if (!start) throw new Error("Kling requires a start image (start_image_url).");
 
-      const { input, out, usedEnd, timing } = await runKling({
+      // end_image => force pro mode (required by schema)
+      const klingMode = end ? "pro" : cfg.kling.mode;
+
+      // include duration (schema default is 5, but settable)
+      const duration = Number(cfg.kling.duration || process.env.MMA_KLING_DURATION || 5);
+
+      const input = {
+        mode: klingMode, // "standard" | "pro"
+        prompt: usedPrompt, // required
+        duration, // ✅ required in practice
+        start_image: start, // ✅ required for kling-v2.1
+        ...(end ? { end_image: end } : {}),
+        ...(cfg.kling.negativePrompt ? { negative_prompt: cfg.kling.negativePrompt } : {}),
+      };
+
+      const { input: klingInput, out, usedEnd, timing } = await runKling({
+        input,
         prompt: usedPrompt,
         startImage: start,
         endImage: end || null,
+        mode: klingMode,
+        duration,
+        negativePrompt: cfg.kling.negativePrompt,
       });
       const url = pickFirstUrl(out);
       if (!url) throw new Error("KLING_NO_URL");
@@ -494,7 +557,7 @@ async function runProductionPipeline({ supabase, generationId, vars, mode, prefe
         stepNo: 2,
         stepType: "kling_generate",
         payload: {
-          input: { ...input, used_end: usedEnd },
+          input: { ...klingInput, used_end: usedEnd },
           output: out,
           timing,
           error: null,
