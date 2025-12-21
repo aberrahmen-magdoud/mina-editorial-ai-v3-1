@@ -4558,7 +4558,7 @@ app.post("/api/r2/store-remote-signed", async (req, res) => {
 });
 
 // Hero Part MMA: Mina Mind API router
-app.use("/mma", mmaRouter);
+
 app.use("/admin/mma", mmaLogAdminRouter);
 
 
