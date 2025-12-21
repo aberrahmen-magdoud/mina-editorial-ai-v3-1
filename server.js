@@ -66,9 +66,12 @@ const envJson = (name, fallbackObj = {}) => {
   }
 };
 
+const NODE_ENV = envStr("NODE_ENV", "");
+const IS_PROD = NODE_ENV === "production";
+
 const requiredInProd = (name) => {
   const val = envStr(name, "");
-  if (process.env.NODE_ENV === "production" && !val) {
+  if (IS_PROD && !val) {
     throw new Error(`Missing required env var ${name} in production`);
   }
   return val;
@@ -76,6 +79,7 @@ const requiredInProd = (name) => {
 
 // Centralized ENV map (single source for all environment config)
 const ENV = {
+  NODE_ENV,
   PORT: envInt("PORT", 3000),
 
   // Supabase
@@ -528,7 +532,7 @@ function makeGptIOInput({ model, systemMessage, userContent, temperature, maxTok
 // =======================
 const R2_PUBLIC_BASE_URL = ENV.R2_PUBLIC_BASE_URL; // e.g. https://assets.faltastudio.com
 
-if (process.env.NODE_ENV === "production" && !R2_PUBLIC_BASE_URL) {
+if (IS_PROD && !R2_PUBLIC_BASE_URL) {
   throw new Error(
     "R2_PUBLIC_BASE_URL is REQUIRED in production so asset URLs are permanent (non-expiring)."
   );
@@ -3340,8 +3344,7 @@ app.post("/sessions/start", async (req, res) => {
 // This handler runs the MMA still pipeline so the existing Mina frontend keeps
 // writing MEGA/MMA rows (generation + steps) while preserving the legacy
 // `/editorial/generate` response shape the UI expects.
-if (ENV.USE_MMA_SHIM) {
-  app.post("/editorial/generate", async (req, res) => {
+const editorialGenerateMmaShim = async (req, res) => {
     const requestId = `req_${Date.now()}_${uuidv4()}`;
 
     try {
@@ -3429,12 +3432,12 @@ if (ENV.USE_MMA_SHIM) {
         requestId,
       });
     }
-  });
-} else {
-  // =======================
-  // ---- Mina Editorial (image) — R2 ONLY output (no provider URLs)
-  // =======================
-  app.post("/editorial/generate", async (req, res) => {
+  };
+
+// =======================
+// ---- Mina Editorial (image) — R2 ONLY output (no provider URLs)
+// =======================
+const editorialGenerateLegacy = async (req, res) => {
     const requestId = `req_${Date.now()}_${uuidv4()}`;
     const generationId = `gen_${uuidv4()}`;
     const startedAt = Date.now();
@@ -3768,8 +3771,11 @@ if (ENV.USE_MMA_SHIM) {
         requestId,
       });
     }
-  });
-}
+  }
+};
+
+const editorialGenerateHandler = ENV.USE_MMA_SHIM ? editorialGenerateMmaShim : editorialGenerateLegacy;
+app.post("/editorial/generate", editorialGenerateHandler);
 // =======================
 // ---- Motion suggestion (textarea) — Supabase-only likes read
 // =======================
