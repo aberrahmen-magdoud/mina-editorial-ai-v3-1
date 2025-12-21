@@ -254,10 +254,14 @@ async function runGptVisionStep({
         ...imageUrls.map((url) => ({ type: "image_url", image_url: { url } })),
       ],
     });
+
+    const maxTokens = Number(
+      config?.max_completion_tokens ?? config?.max_tokens ?? 500
+    );
     const resp = await openai.chat.completions.create({
       model: config?.model || "gpt-5-mini",
       messages,
-      max_tokens: config?.max_tokens || 300,
+      max_completion_tokens: Number.isFinite(maxTokens) ? maxTokens : 500,
     });
     const text = resp.choices?.[0]?.message?.content?.trim() || "";
     return { text, raw: resp };
@@ -290,10 +294,14 @@ async function runGptTextStep({ openai, config, inputText, stepType }) {
     const messages = [];
     if (config?.system) messages.push({ role: "system", content: config.system });
     messages.push({ role: "user", content: inputText || config?.prompt || "" });
+
+    const maxTokens = Number(
+      config?.max_completion_tokens ?? config?.max_tokens ?? 500
+    );
     const resp = await openai.chat.completions.create({
       model: config?.model || "gpt-5-mini",
       messages,
-      max_tokens: config?.max_tokens || 400,
+      max_completion_tokens: Number.isFinite(maxTokens) ? maxTokens : 500,
     });
     const text = resp.choices?.[0]?.message?.content?.trim() || "";
     return { text, raw: resp };

@@ -35,8 +35,107 @@ import { requireAdmin } from "./auth.js";
 import { createMmaController } from "./server/mma/mma-controller.js";
 import createMmaRouter from "./server/mma/mma-router.js";
 
+// ---------------------------------------------------------------------------
+// Environment helpers (Render-friendly; avoids scattered process.env reads)
+// ---------------------------------------------------------------------------
+const envStr = (name, fallback = "") => {
+  const raw = process.env[name];
+  if (raw === undefined || raw === null) return fallback;
+  const trimmed = String(raw).trim();
+  return trimmed.length ? trimmed : fallback;
+};
+
+const envInt = (name, fallback = 0) => {
+  const n = Number(envStr(name, ""));
+  return Number.isFinite(n) ? n : fallback;
+};
+
+const envBool = (name, fallback = false) => {
+  const val = envStr(name, "").toLowerCase();
+  if (!val) return fallback;
+  return ["1", "true", "yes", "on"].includes(val);
+};
+
+const envJson = (name, fallbackObj = {}) => {
+  const raw = envStr(name, "");
+  if (!raw) return fallbackObj;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return fallbackObj;
+  }
+};
+
+const NODE_ENV = envStr("NODE_ENV", "");
+const IS_PROD = NODE_ENV === "production";
+
+const requiredInProd = (name) => {
+  const val = envStr(name, "");
+  if (IS_PROD && !val) {
+    throw new Error(`Missing required env var ${name} in production`);
+  }
+  return val;
+};
+
+// Centralized ENV map (single source for all environment config)
+const ENV = {
+  NODE_ENV,
+  PORT: envInt("PORT", 3000),
+
+  // Supabase
+  SUPABASE_URL: requiredInProd("SUPABASE_URL"),
+  SUPABASE_SERVICE_ROLE_KEY: requiredInProd("SUPABASE_SERVICE_ROLE_KEY"),
+
+  // OpenAI / Replicate
+  OPENAI_API_KEY: envStr("OPENAI_API_KEY", ""),
+  REPLICATE_API_TOKEN: envStr("REPLICATE_API_TOKEN", ""),
+
+  // R2
+  R2_ACCOUNT_ID: envStr("R2_ACCOUNT_ID", ""),
+  R2_ACCESS_KEY_ID: envStr("R2_ACCESS_KEY_ID", ""),
+  R2_SECRET_ACCESS_KEY: envStr("R2_SECRET_ACCESS_KEY", ""),
+  R2_BUCKET: envStr("R2_BUCKET", ""),
+  R2_PUBLIC_BASE_URL: envStr("R2_PUBLIC_BASE_URL", "").replace(/\/+$/, ""),
+  R2_ENDPOINT: envStr("R2_ENDPOINT", ""),
+
+  // Shopify
+  SHOPIFY_STORE_DOMAIN: envStr("SHOPIFY_STORE_DOMAIN", ""),
+  SHOPIFY_ADMIN_TOKEN: envStr("SHOPIFY_ADMIN_TOKEN", ""),
+  SHOPIFY_API_VERSION: envStr("SHOPIFY_API_VERSION", "2025-10"),
+  SHOPIFY_ORDER_WEBHOOK_SECRET: envStr("SHOPIFY_ORDER_WEBHOOK_SECRET", ""),
+  SHOPIFY_MINA_TAG: envStr("SHOPIFY_MINA_TAG", "Mina_users"),
+  SHOPIFY_WELCOME_MATCHA_VARIANT_ID: envStr("SHOPIFY_WELCOME_MATCHA_VARIANT_ID", ""),
+  CREDIT_PRODUCT_MAP: envJson("CREDIT_PRODUCT_MAP", {}),
+
+  // App tuning / routing
+  CORS_ORIGINS: envStr("CORS_ORIGINS", ""),
+  DEFAULT_FREE_CREDITS: Math.max(0, envInt("DEFAULT_FREE_CREDITS", 0)),
+  CREDITS_EXPIRE_DAYS: envInt("CREDITS_EXPIRE_DAYS", 30),
+  IMAGE_CREDITS_COST: envInt("IMAGE_CREDITS_COST", 1),
+  MOTION_CREDITS_COST: envInt("MOTION_CREDITS_COST", 5),
+  RUNTIME_CONFIG_TTL_MS: envInt("RUNTIME_CONFIG_TTL_MS", 5000),
+  USE_MMA_SHIM: envBool("USE_MMA_SHIM", true),
+
+  // Provider overrides
+  SEADREAM_MODEL_VERSION: envStr("SEADREAM_MODEL_VERSION", "bytedance/seedream-4"),
+  KLING_MODEL_VERSION: envStr("KLING_MODEL_VERSION", "kwaivgi/kling-v2.1"),
+};
+
+// Safe boot log (no secrets)
+console.log("ENV CHECK", {
+  SUPABASE_URL_set: !!ENV.SUPABASE_URL,
+  SUPABASE_SERVICE_ROLE_KEY_set: !!ENV.SUPABASE_SERVICE_ROLE_KEY,
+  OPENAI_API_KEY_set: !!ENV.OPENAI_API_KEY,
+  REPLICATE_API_TOKEN_set: !!ENV.REPLICATE_API_TOKEN,
+  R2_BUCKET_set: !!ENV.R2_BUCKET,
+  R2_PUBLIC_BASE_URL_len: ENV.R2_PUBLIC_BASE_URL.length,
+  SHOPIFY_STORE_DOMAIN_set: !!ENV.SHOPIFY_STORE_DOMAIN,
+  CORS_ORIGINS_len: ENV.CORS_ORIGINS.length,
+  USE_MMA_SHIM: ENV.USE_MMA_SHIM,
+});
+
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = ENV.PORT;
 // SubPart: We show total users with a friendly offset so numbers look nicer.
 const MINA_BASELINE_USERS = 3651; // offset we add on top of DB users
 
@@ -71,13 +170,6 @@ process.on("uncaughtException", async (err) => {
     console.error("[process.uncaughtException] failed to log", loggingError);
   }
 });
-// ✅ Put it RIGHT HERE (before supabase init / routes)
-console.log("ENV CHECK", {
-  SUPABASE_URL_set: !!process.env.SUPABASE_URL,
-  SUPABASE_URL_len: process.env.SUPABASE_URL?.length ?? 0,
-  SUPABASE_SERVICE_ROLE_KEY_set: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
-  SUPABASE_SERVICE_ROLE_KEY_len: process.env.SUPABASE_SERVICE_ROLE_KEY?.length ?? 0,
-});
 // Part 1.2: Supabase (service role) — MEGA-first persistence
 // Part 1.2.1: Tables (MEGA-only)
 //   - mega_customers
@@ -85,8 +177,8 @@ console.log("ENV CHECK", {
 //   - mega_admin
 // Part 1.2.2: Legacy tables are no longer written, so new writes stay clean.
 // ======================================================
-const SUPABASE_URL = process.env.SUPABASE_URL || "";
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+const SUPABASE_URL = ENV.SUPABASE_URL || "";
+const SUPABASE_SERVICE_ROLE_KEY = ENV.SUPABASE_SERVICE_ROLE_KEY || "";
 
 // Part: Supabase service client (used for all database writes)
 // SubPart: we only construct it when env vars are present so local dev can still boot.
@@ -113,7 +205,7 @@ function nowIso() {
 // - N defaults to 30 if env is missing/invalid
 // ======================================================
 const DEFAULT_CREDITS_EXPIRE_DAYS = (() => {
-  const raw = Number(process.env.CREDITS_EXPIRE_DAYS);
+  const raw = Number(ENV.CREDITS_EXPIRE_DAYS);
   if (Number.isFinite(raw) && raw > 0) return Math.floor(raw);
   return 30;
 })();
@@ -345,14 +437,14 @@ async function updateMmaPreferencesForEvent(passId, eventType, payload) {
 // Hero Part 2: File uploads to Cloudflare R2 (S3 compatible)
 // Part 2.1: Build a tiny R2 client and a Multer uploader so API routes can stash files.
 // Part 2.1.1: Safe naming helpers prevent weird characters from breaking object keys.
-const R2_ACCOUNT_ID = process.env.R2_ACCOUNT_ID;
-const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID;
-const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY;
-const R2_BUCKET = process.env.R2_BUCKET;
+const R2_ACCOUNT_ID = ENV.R2_ACCOUNT_ID;
+const R2_ACCESS_KEY_ID = ENV.R2_ACCESS_KEY_ID;
+const R2_SECRET_ACCESS_KEY = ENV.R2_SECRET_ACCESS_KEY;
+const R2_BUCKET = ENV.R2_BUCKET;
 
 // Optional override, otherwise computed from account id
 const R2_ENDPOINT =
-  process.env.R2_ENDPOINT || `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`;
+  ENV.R2_ENDPOINT || (R2_ACCOUNT_ID ? `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com` : "");
 
 const r2 = new S3Client({
   region: "auto",
@@ -438,9 +530,9 @@ function makeGptIOInput({ model, systemMessage, userContent, temperature, maxTok
 // Part 2.2.1: Converts signed temp URLs into permanent, shareable URLs when possible.
 // Part 2.2.2: Guards against missing public domain config so uploads never break later.
 // =======================
-const R2_PUBLIC_BASE_URL = (process.env.R2_PUBLIC_BASE_URL || "").replace(/\/+$/, ""); // e.g. https://assets.faltastudio.com
+const R2_PUBLIC_BASE_URL = ENV.R2_PUBLIC_BASE_URL; // e.g. https://assets.faltastudio.com
 
-if (process.env.NODE_ENV === "production" && !R2_PUBLIC_BASE_URL) {
+if (IS_PROD && !R2_PUBLIC_BASE_URL) {
   throw new Error(
     "R2_PUBLIC_BASE_URL is REQUIRED in production so asset URLs are permanent (non-expiring)."
   );
@@ -621,13 +713,13 @@ const BASE_GPT_SYSTEM_MOTION_SUGGEST =
 
 const DEFAULT_RUNTIME_CONFIG = {
   models: {
-    seadream: process.env.SEADREAM_MODEL_VERSION || "bytedance/seedream-4",
-    kling: process.env.KLING_MODEL_VERSION || "kwaivgi/kling-v2.1",
-    gpt: "gpt-5-mini",
+    seadream: ENV.SEADREAM_MODEL_VERSION,
+    kling: ENV.KLING_MODEL_VERSION,
+    gpt: "gpt-4.1-mini",
   },
   credits: {
-    imageCost: Number(process.env.IMAGE_CREDITS_COST || 1),
-    motionCost: Number(process.env.MOTION_CREDITS_COST || 5),
+    imageCost: Number(ENV.IMAGE_CREDITS_COST || 1),
+    motionCost: Number(ENV.MOTION_CREDITS_COST || 5),
   },
   replicate: {
     seadream: {
@@ -853,7 +945,7 @@ const runtimeConfigCache = {
   fetchedAt: 0,
 };
 
-const RUNTIME_CONFIG_TTL_MS = Number(process.env.RUNTIME_CONFIG_TTL_MS || 5000);
+const RUNTIME_CONFIG_TTL_MS = Number(ENV.RUNTIME_CONFIG_TTL_MS || 5000);
 
 async function getRuntimeConfig() {
   if (!sbEnabled()) return runtimeConfigCache.effective;
@@ -1400,7 +1492,7 @@ const defaultAllowlist = [
   "https://mina-app-bvpn.onrender.com",
 ];
 
-const envAllowlist = (process.env.CORS_ORIGINS || "")
+const envAllowlist = (ENV.CORS_ORIGINS || "")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
@@ -1446,17 +1538,17 @@ app.post("/auth/shopify-sync", (_req, res) => {
 // ✅ Shopify webhook: orders/paid → credit user + tag
 // (PLACE THIS BEFORE app.use(express.json()))
 // ======================================================
-const SHOPIFY_STORE_DOMAIN = process.env.SHOPIFY_STORE_DOMAIN || "";
-const SHOPIFY_ADMIN_TOKEN = process.env.SHOPIFY_ADMIN_TOKEN || "";
-const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || "2025-10";
+const SHOPIFY_STORE_DOMAIN = ENV.SHOPIFY_STORE_DOMAIN || "";
+const SHOPIFY_ADMIN_TOKEN = ENV.SHOPIFY_ADMIN_TOKEN || "";
+const SHOPIFY_API_VERSION = ENV.SHOPIFY_API_VERSION || "2025-10";
 
-const SHOPIFY_ORDER_WEBHOOK_SECRET = process.env.SHOPIFY_ORDER_WEBHOOK_SECRET || "";
-const SHOPIFY_MINA_TAG = process.env.SHOPIFY_MINA_TAG || "Mina_users"; // match your segment/tag
-const SHOPIFY_WELCOME_MATCHA_VARIANT_ID = String(process.env.SHOPIFY_WELCOME_MATCHA_VARIANT_ID || "");
+const SHOPIFY_ORDER_WEBHOOK_SECRET = ENV.SHOPIFY_ORDER_WEBHOOK_SECRET || "";
+const SHOPIFY_MINA_TAG = ENV.SHOPIFY_MINA_TAG || "Mina_users"; // match your segment/tag
+const SHOPIFY_WELCOME_MATCHA_VARIANT_ID = String(ENV.SHOPIFY_WELCOME_MATCHA_VARIANT_ID || "");
 
 let CREDIT_PRODUCT_MAP = {};
 try {
-  CREDIT_PRODUCT_MAP = JSON.parse(process.env.CREDIT_PRODUCT_MAP || "{}");
+  CREDIT_PRODUCT_MAP = ENV.CREDIT_PRODUCT_MAP || {};
 } catch {
   CREDIT_PRODUCT_MAP = {};
 }
@@ -1690,12 +1782,12 @@ app.post("/api/log-error", async (req, res) => {
 
 // Replicate (SeaDream + Kling)
 const replicate = new Replicate({
-  auth: process.env.REPLICATE_API_TOKEN,
+  auth: ENV.REPLICATE_API_TOKEN,
 });
 
 // OpenAI (GPT brain for Mina)
 const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
+  apiKey: ENV.OPENAI_API_KEY,
 });
 
 const mmaController = createMmaController({ supabaseAdmin, openai, replicate });
@@ -1716,12 +1808,12 @@ const mmaRouter = createMmaRouter({
 });
 
 // Models
-const SEADREAM_MODEL = process.env.SEADREAM_MODEL_VERSION || "bytedance/seedream-4";
-const KLING_MODEL = process.env.KLING_MODEL_VERSION || "kwaivgi/kling-v2.1";
+const SEADREAM_MODEL = ENV.SEADREAM_MODEL_VERSION || "bytedance/seedream-4";
+const KLING_MODEL = ENV.KLING_MODEL_VERSION || "kwaivgi/kling-v2.1";
 
 // How many credits each operation costs
-const IMAGE_CREDITS_COST = Number(process.env.IMAGE_CREDITS_COST || 1);
-const MOTION_CREDITS_COST = Number(process.env.MOTION_CREDITS_COST || 5);
+const IMAGE_CREDITS_COST = Number(ENV.IMAGE_CREDITS_COST || 1);
+const MOTION_CREDITS_COST = Number(ENV.MOTION_CREDITS_COST || 5);
 
 // ======================================================
 // Style presets
@@ -2604,7 +2696,7 @@ app.get("/me", async (req, res) => {
       return {};
     })();
 
-    const DEFAULT_FREE_CREDITS = Math.max(0, Number(process.env.DEFAULT_FREE_CREDITS || 0) || 0);
+    const DEFAULT_FREE_CREDITS = ENV.DEFAULT_FREE_CREDITS;
 
     // Always enforce a positive expiry window (policy = rolling 30d minimum)
     const CREDITS_EXPIRE_DAYS = DEFAULT_CREDITS_EXPIRE_DAYS;
@@ -3252,434 +3344,438 @@ app.post("/sessions/start", async (req, res) => {
 // This handler runs the MMA still pipeline so the existing Mina frontend keeps
 // writing MEGA/MMA rows (generation + steps) while preserving the legacy
 // `/editorial/generate` response shape the UI expects.
-app.post("/editorial/generate", async (req, res) => {
-  const requestId = `req_${Date.now()}_${uuidv4()}`;
+const editorialGenerateMmaShim = async (req, res) => {
+    const requestId = `req_${Date.now()}_${uuidv4()}`;
 
-  try {
-    if (!sbEnabled()) {
+    try {
+      if (!sbEnabled()) {
+        return res.status(500).json({
+          ok: false,
+          error: "NO_DB",
+          message: "Supabase not configured",
+          requestId,
+        });
+      }
+
+      const body = req.body || {};
+      const customerId = resolveCustomerId(req, body);
+      const assets = {
+        product_url: safeString(body.productImageUrl) || null,
+        logo_url: safeString(body.logoImageUrl) || null,
+        inspiration_urls: Array.isArray(body.styleImageUrls)
+          ? body.styleImageUrls.filter(Boolean)
+          : [],
+        style_hero_url: null,
+        input_still_image_id: null,
+        still_url: null,
+      };
+
+      const inputs = {
+        userBrief: safeString(body.brief),
+        style: safeString(body.tone || body.stylePresetKey || ""),
+        aspect_ratio: safeString(body.aspectRatio || ""),
+        platform: safeString(body.platform || ""),
+      };
+
+      const settings = {};
+      if (inputs.aspect_ratio) settings.seedream = { aspect_ratio: inputs.aspect_ratio };
+
+      const result = await mmaController.runStillCreate({
+        customerId,
+        email: req?.user?.email || null,
+        userId: req?.user?.userId || null,
+        assets,
+        inputs,
+        history: { vision_intelligence: !!body.minaVisionEnabled },
+        brief: safeString(body.brief || ""),
+        settings,
+      });
+
+      if (result?.passId) {
+        res.set("X-Mina-Pass-Id", result.passId);
+      }
+
+      const imageUrl = result?.outputs?.seedream_image_url || null;
+      const prompt = result?.mma_vars?.prompts?.clean_prompt || inputs.userBrief || "";
+      const creditsInfo = await sbGetCredits({
+        customerId,
+        reqUserId: req?.user?.userId,
+        reqEmail: req?.user?.email,
+      });
+
+      return res.json({
+        ok: true,
+        requestId,
+        generationId: result?.generationId,
+        passId: result?.passId || null,
+        prompt,
+        imageUrl,
+        imageUrls: imageUrl ? [imageUrl] : [],
+        sessionId: null,
+        gpt: {
+          userMessage: result?.mma_vars?.prompts?.clean_prompt || null,
+          imageTexts: result?.mma_vars?.scans?.output_still_crt
+            ? [result.mma_vars.scans.output_still_crt]
+            : undefined,
+        },
+        credits:
+          creditsInfo.balance === null || creditsInfo.balance === undefined
+            ? undefined
+            : { balance: creditsInfo.balance },
+      });
+    } catch (err) {
+      console.error("Error in /editorial/generate (mma shim):", err);
       return res.status(500).json({
         ok: false,
-        error: "NO_DB",
-        message: "Supabase not configured",
+        error: "MMA_EDITORIAL_ERROR",
+        message: err?.message || "Unexpected error during editorial generate.",
         requestId,
       });
     }
-
-    const body = req.body || {};
-    const customerId = resolveCustomerId(req, body);
-    const assets = {
-      product_url: safeString(body.productImageUrl) || null,
-      logo_url: safeString(body.logoImageUrl) || null,
-      inspiration_urls: Array.isArray(body.styleImageUrls)
-        ? body.styleImageUrls.filter(Boolean)
-        : [],
-      style_hero_url: null,
-      input_still_image_id: null,
-      still_url: null,
-    };
-
-    const inputs = {
-      userBrief: safeString(body.brief),
-      style: safeString(body.tone || body.stylePresetKey || ""),
-      aspect_ratio: safeString(body.aspectRatio || ""),
-      platform: safeString(body.platform || ""),
-    };
-
-    const settings = {};
-    if (inputs.aspect_ratio) settings.seedream = { aspect_ratio: inputs.aspect_ratio };
-
-    const result = await mmaController.runStillCreate({
-      customerId,
-      email: req?.user?.email || null,
-      userId: req?.user?.userId || null,
-      assets,
-      inputs,
-      history: { vision_intelligence: !!body.minaVisionEnabled },
-      brief: safeString(body.brief || ""),
-      settings,
-    });
-
-    if (result?.passId) {
-      res.set("X-Mina-Pass-Id", result.passId);
-    }
-
-    const imageUrl = result?.outputs?.seedream_image_url || null;
-    const prompt = result?.mma_vars?.prompts?.clean_prompt || inputs.userBrief || "";
-    const creditsInfo = await sbGetCredits({
-      customerId,
-      reqUserId: req?.user?.userId,
-      reqEmail: req?.user?.email,
-    });
-
-    return res.json({
-      ok: true,
-      requestId,
-      generationId: result?.generationId,
-      passId: result?.passId || null,
-      prompt,
-      imageUrl,
-      imageUrls: imageUrl ? [imageUrl] : [],
-      sessionId: null,
-      gpt: {
-        userMessage: result?.mma_vars?.prompts?.clean_prompt || null,
-        imageTexts: result?.mma_vars?.scans?.output_still_crt
-          ? [result.mma_vars.scans.output_still_crt]
-          : undefined,
-      },
-      credits:
-        creditsInfo.balance === null || creditsInfo.balance === undefined
-          ? undefined
-          : { balance: creditsInfo.balance },
-    });
-  } catch (err) {
-    console.error("Error in /editorial/generate (mma shim):", err);
-    return res.status(500).json({
-      ok: false,
-      error: "MMA_EDITORIAL_ERROR",
-      message: err?.message || "Unexpected error during editorial generate.",
-      requestId,
-    });
-  }
-});
+  };
 
 // =======================
 // ---- Mina Editorial (image) — R2 ONLY output (no provider URLs)
 // =======================
-app.post("/editorial/generate", async (req, res) => {
-  const requestId = `req_${Date.now()}_${uuidv4()}`;
-  const generationId = `gen_${uuidv4()}`;
-  const startedAt = Date.now();
+const editorialGenerateLegacy = async (req, res) => {
+    const requestId = `req_${Date.now()}_${uuidv4()}`;
+    const generationId = `gen_${uuidv4()}`;
+    const startedAt = Date.now();
 
-  try {
-    if (!sbEnabled()) {
-      return res.status(500).json({
-        ok: false,
-        error: "NO_DB",
-        message: "Supabase not configured",
-        requestId,
+    try {
+      if (!sbEnabled()) {
+        return res.status(500).json({
+          ok: false,
+          error: "NO_DB",
+          message: "Supabase not configured",
+          requestId,
+        });
+      }
+
+      const body = req.body || {};
+      let customerId = resolveCustomerId(req, body);
+      let platform = safeString(body.platform || "tiktok").toLowerCase();
+      let stylePresetKey = safeString(body.stylePresetKey || "");
+      const productImageUrl = safeString(body.productImageUrl);
+      const logoImageUrl = safeString(body.logoImageUrl || "");
+      const styleImageUrls = Array.isArray(body.styleImageUrls) ? body.styleImageUrls : [];
+      const brief = safeString(body.brief);
+      const tone = safeString(body.tone);
+      const minaVisionEnabled = !!body.minaVisionEnabled;
+      const preset = stylePresetKey ? STYLE_PRESETS[stylePresetKey] || null : null;
+
+      if (!productImageUrl && !brief) {
+        auditAiEvent(req, "ai_error", 400, {
+          request_id: requestId,
+          step: "vision",
+          input_type: "text",
+          output_type: "image",
+          model: SEADREAM_MODEL,
+          provider: "replicate",
+          generation_id: generationId,
+          detail: { reason: "missing_input" },
+        });
+        return res.status(400).json({
+          ok: false,
+          error: "MISSING_INPUT",
+          message: "Provide at least productImageUrl or brief so Mina knows what to create.",
+          requestId,
+        });
+      }
+
+      const cust = await sbEnsureCustomer({
+        customerId,
+        userId: req?.user?.userId || null,
+        email: req?.user?.email || null,
       });
-    }
+      const passId = cust?.passId || null;
 
-    const body = req.body || {};
-    let customerId = resolveCustomerId(req, body);
-    let platform = safeString(body.platform || "tiktok").toLowerCase();
-    let stylePresetKey = safeString(body.stylePresetKey || "");
-    const productImageUrl = safeString(body.productImageUrl);
-    const logoImageUrl = safeString(body.logoImageUrl || "");
-    const styleImageUrls = Array.isArray(body.styleImageUrls) ? body.styleImageUrls : [];
-    const brief = safeString(body.brief);
-    const tone = safeString(body.tone);
-    const minaVisionEnabled = !!body.minaVisionEnabled;
-    const preset = stylePresetKey ? STYLE_PRESETS[stylePresetKey] || null : null;
-
-    if (!productImageUrl && !brief) {
-      auditAiEvent(req, "ai_error", 400, {
-        request_id: requestId,
-        step: "vision",
-        input_type: "text",
-        output_type: "image",
-        model: SEADREAM_MODEL,
-        provider: "replicate",
-        generation_id: generationId,
-        detail: { reason: "missing_input" },
+      const cfg = await getRuntimeConfig();
+      const imageCost = Number(cfg?.credits?.imageCost ?? IMAGE_CREDITS_COST);
+      // ✅ TEMP DEBUG: remove after you see values
+      console.log("[CREDITS_DEBUG]", {
+        customerId_from_body: req.body?.customerId,
+        customerId_used: customerId,
+        auth_user: req.user || null,
+        header_pass_id: req.get("X-Mina-Pass-Id") || null,
       });
-      return res.status(400).json({
-        ok: false,
-        error: "MISSING_INPUT",
-        message: "Provide at least productImageUrl or brief so Mina knows what to create.",
-        requestId,
+
+      const creditsInfo = await sbGetCredits({
+        customerId,
+        reqUserId: req?.user?.userId,
+        reqEmail: req?.user?.email,
       });
-    }
 
-    const cust = await sbEnsureCustomer({
-      customerId,
-      userId: req?.user?.userId || null,
-      email: req?.user?.email || null,
-    });
-    const passId = cust?.passId || null;
+      if ((creditsInfo.balance ?? 0) < imageCost) {
+        auditAiEvent(req, "ai_error", 402, {
+          request_id: requestId,
+          step: "vision",
+          input_type: productImageUrl ? "image" : "text",
+          output_type: "image",
+          model: SEADREAM_MODEL,
+          provider: "replicate",
+          generation_id: generationId,
+          detail: {
+            reason: "insufficient_credits",
+            required: imageCost,
+            balance: creditsInfo.balance ?? 0,
+          },
+        });
+        return res.status(402).json({
+          ok: false,
+          error: "INSUFFICIENT_CREDITS",
+          message: `Not enough Mina credits. Need ${imageCost}, you have ${creditsInfo.balance ?? 0}.`,
+          requiredCredits: imageCost,
+          currentCredits: creditsInfo.balance ?? 0,
+          requestId,
+          passId,
+        });
+      }
 
-    const cfg = await getRuntimeConfig();
-    const imageCost = Number(cfg?.credits?.imageCost ?? IMAGE_CREDITS_COST);
-    // ✅ TEMP DEBUG: remove after you see values
-    console.log("[CREDITS_DEBUG]", {
-      customerId_from_body: req.body?.customerId,
-      customerId_used: customerId,
-      auth_user: req.user || null,
-      header_pass_id: req.get("X-Mina-Pass-Id") || null,
-    });
-  
-    const creditsInfo = await sbGetCredits({
-      customerId,
-      reqUserId: req?.user?.userId,
-      reqEmail: req?.user?.email,
-    });
+      const session = ensureSession(body.sessionId, customerId, platform);
+      const sessionId = session.id;
+      persistSessionHash(req, sessionId || requestId, req.user?.userId, req.user?.email);
 
-    if ((creditsInfo.balance ?? 0) < imageCost) {
-      auditAiEvent(req, "ai_error", 402, {
+      let styleHistory = [];
+      let userStyleProfile = null;
+      let finalStyleProfile = null;
+      let styleProfileMeta = null;
+
+      if (minaVisionEnabled && customerId) {
+        const likes = await getLikes(customerId);
+        styleHistory = getStyleHistoryFromLikes(likes);
+        const profileRes = await getOrBuildStyleProfile(customerId, likes);
+        userStyleProfile = profileRes.profile;
+
+        const merged = mergePresetAndUserProfile(preset ? preset.profile : null, userStyleProfile);
+        finalStyleProfile = merged.profile;
+        styleProfileMeta = {
+          ...profileRes.meta,
+          presetKey: stylePresetKey || null,
+          mergeSource: merged.source,
+        };
+      } else {
+        styleHistory = [];
+        const merged = mergePresetAndUserProfile(preset ? preset.profile : null, null);
+        finalStyleProfile = merged.profile;
+        styleProfileMeta = {
+          source: merged.source,
+          likesCount: 0,
+          presetKey: stylePresetKey || null,
+        };
+      }
+
+      const promptResult = await buildEditorialPrompt({
+        productImageUrl,
+        logoImageUrl,
+        styleImageUrls,
+        brief,
+        tone,
+        platform,
+        mode: "image",
+        styleHistory,
+        styleProfile: finalStyleProfile,
+        presetHeroImageUrls: preset?.heroImageUrls || [],
+      });
+
+      const prompt = promptResult.prompt;
+      const imageTexts = promptResult.imageTexts || [];
+      const userMessage = promptResult.userMessage || "";
+
+      const requestedAspect = safeString(body.aspectRatio || "");
+      const validAspects = new Set(["9:16", "3:4", "2:3", "1:1", "3:2", "16:9"]);
+      let aspectRatio = "2:3";
+
+      if (validAspects.has(requestedAspect)) {
+        aspectRatio = requestedAspect;
+      } else {
+        if (platform === "tiktok" || platform.includes("reel")) aspectRatio = "9:16";
+        else if (platform === "instagram-post") aspectRatio = "3:4";
+        else if (platform === "print") aspectRatio = "2:3";
+        else if (platform === "square") aspectRatio = "1:1";
+        else if (platform.includes("youtube")) aspectRatio = "16:9";
+      }
+
+      const seadreamModel = cfg?.models?.seadream || SEADREAM_MODEL;
+
+      const input = {
+        prompt,
+        image_input: productImageUrl ? [productImageUrl, ...styleImageUrls] : styleImageUrls,
+        max_images: body.maxImages || 1,
+        size: cfg?.replicate?.seadream?.size || "2K",
+        aspect_ratio: aspectRatio,
+        enhance_prompt: cfg?.replicate?.seadream?.enhance_prompt ?? true,
+        sequential_image_generation: cfg?.replicate?.seadream?.sequential_image_generation || "disabled",
+      };
+
+      auditAiEvent(req, "ai_request", 200, {
         request_id: requestId,
         step: "vision",
         input_type: productImageUrl ? "image" : "text",
         output_type: "image",
-        model: SEADREAM_MODEL,
-        provider: "replicate",
-        generation_id: generationId,
-        detail: {
-          reason: "insufficient_credits",
-          required: imageCost,
-          balance: creditsInfo.balance ?? 0,
-        },
-      });
-      return res.status(402).json({
-        ok: false,
-        error: "INSUFFICIENT_CREDITS",
-        message: `Not enough Mina credits. Need ${imageCost}, you have ${creditsInfo.balance ?? 0}.`,
-        requiredCredits: imageCost,
-        currentCredits: creditsInfo.balance ?? 0,
-        requestId,
-        passId,
-      });
-    }
-
-    const session = ensureSession(body.sessionId, customerId, platform);
-    const sessionId = session.id;
-    persistSessionHash(req, sessionId || requestId, req.user?.userId, req.user?.email);
-
-    let styleHistory = [];
-    let userStyleProfile = null;
-    let finalStyleProfile = null;
-    let styleProfileMeta = null;
-
-    if (minaVisionEnabled && customerId) {
-      const likes = await getLikes(customerId);
-      styleHistory = getStyleHistoryFromLikes(likes);
-      const profileRes = await getOrBuildStyleProfile(customerId, likes);
-      userStyleProfile = profileRes.profile;
-
-      const merged = mergePresetAndUserProfile(preset ? preset.profile : null, userStyleProfile);
-      finalStyleProfile = merged.profile;
-      styleProfileMeta = {
-        ...profileRes.meta,
-        presetKey: stylePresetKey || null,
-        mergeSource: merged.source,
-      };
-    } else {
-      styleHistory = [];
-      const merged = mergePresetAndUserProfile(preset ? preset.profile : null, null);
-      finalStyleProfile = merged.profile;
-      styleProfileMeta = {
-        source: merged.source,
-        likesCount: 0,
-        presetKey: stylePresetKey || null,
-      };
-    }
-
-    const promptResult = await buildEditorialPrompt({
-      productImageUrl,
-      logoImageUrl,
-      styleImageUrls,
-      brief,
-      tone,
-      platform,
-      mode: "image",
-      styleHistory,
-      styleProfile: finalStyleProfile,
-      presetHeroImageUrls: preset?.heroImageUrls || [],
-    });
-
-    const prompt = promptResult.prompt;
-    const imageTexts = promptResult.imageTexts || [];
-    const userMessage = promptResult.userMessage || "";
-
-    const requestedAspect = safeString(body.aspectRatio || "");
-    const validAspects = new Set(["9:16", "3:4", "2:3", "1:1", "3:2", "16:9"]);
-    let aspectRatio = "2:3";
-
-    if (validAspects.has(requestedAspect)) {
-      aspectRatio = requestedAspect;
-    } else {
-      if (platform === "tiktok" || platform.includes("reel")) aspectRatio = "9:16";
-      else if (platform === "instagram-post") aspectRatio = "3:4";
-      else if (platform === "print") aspectRatio = "2:3";
-      else if (platform === "square") aspectRatio = "1:1";
-      else if (platform.includes("youtube")) aspectRatio = "16:9";
-    }
-
-    const seadreamModel = cfg?.models?.seadream || SEADREAM_MODEL;
-
-    const input = {
-      prompt,
-      image_input: productImageUrl ? [productImageUrl, ...styleImageUrls] : styleImageUrls,
-      max_images: body.maxImages || 1,
-      size: cfg?.replicate?.seadream?.size || "2K",
-      aspect_ratio: aspectRatio,
-      enhance_prompt: cfg?.replicate?.seadream?.enhance_prompt ?? true,
-      sequential_image_generation: cfg?.replicate?.seadream?.sequential_image_generation || "disabled",
-    };
-
-    auditAiEvent(req, "ai_request", 200, {
-      request_id: requestId,
-      step: "vision",
-      input_type: productImageUrl ? "image" : "text",
-      output_type: "image",
-      session_id: sessionId,
-      customer_id: customerId,
-      model: seadreamModel,
-      provider: "replicate",
-      input_chars: (prompt || "").length,
-      stylePresetKey,
-      minaVisionEnabled,
-      generation_id: generationId,
-    });
-
-    const output = await replicate.run(seadreamModel, { input });
-
-    let providerUrls = [];
-    if (Array.isArray(output)) {
-      providerUrls = output
-        .map((item) => {
-          if (typeof item === "string") return item;
-          if (item && typeof item === "object") return item.url || item.image || null;
-          return null;
-        })
-        .filter(Boolean);
-    } else if (typeof output === "string") {
-      providerUrls = [output];
-    } else if (output && typeof output === "object") {
-      if (typeof output.url === "string") providerUrls = [output.url];
-      else if (Array.isArray(output.output)) providerUrls = output.output.filter((v) => typeof v === "string");
-    }
-
-    if (!providerUrls.length) throw new Error("Image generation returned no URL.");
-
-    const storedImages = await Promise.all(
-      providerUrls.map((u) =>
-        storeRemoteToR2Public({
-          remoteUrl: u,
-          kind: "generations",
-          customerId,
-        })
-      )
-    );
-
-    const imageUrls = storedImages.map((s) => s.publicUrl);
-    const outputKey = storedImages[0]?.key || null;
-    const imageUrl = imageUrls[0] || null;
-
-    if (!imageUrl) throw new Error("R2 store failed (no public URL). Check R2_PUBLIC_BASE_URL.");
-
-    const spend = await sbAdjustCredits({
-      customerId,
-      delta: -imageCost,
-      reason: "image-generate",
-      source: "api",
-      refType: "generation",
-      refId: generationId,
-      reqUserId: req?.user?.userId,
-      reqEmail: req?.user?.email,
-    });
-
-    const latencyMs = Date.now() - startedAt;
-    const outputChars = imageUrls.join(",").length;
-
-    const generationRecord = {
-      id: generationId,
-      type: "image",
-      sessionId,
-      customerId,
-      platform,
-      prompt: prompt || "",
-      outputUrl: imageUrl,
-      outputKey,
-      createdAt: new Date().toISOString(),
-      meta: {
-        tone,
-        platform,
-        minaVisionEnabled,
-        stylePresetKey,
-        productImageUrl,
-        logoImageUrl,
-        styleImageUrls,
-        aspectRatio,
-        imageTexts,
-        userMessage,
-        requestId,
-        latencyMs,
-        inputChars: (prompt || "").length,
-        outputChars,
+        session_id: sessionId,
+        customer_id: customerId,
         model: seadreamModel,
         provider: "replicate",
-        status: "succeeded",
-        userId: req.user?.userId,
-        email: req.user?.email,
-      },
-    };
+        input_chars: (prompt || "").length,
+        stylePresetKey,
+        minaVisionEnabled,
+        generation_id: generationId,
+      });
 
-    void sbUpsertGenerationBusiness(generationRecord).catch((e) =>
-      console.error("[supabase] generation upsert failed:", e?.message || e)
-    );
+      const output = await replicate.run(seadreamModel, { input });
 
-    auditAiEvent(req, "ai_response", 200, {
-      request_id: requestId,
-      step: "vision",
-      input_type: productImageUrl ? "image" : "text",
-      output_type: "image",
-      r2_url: imageUrl,
-      session_id: sessionId,
-      customer_id: customerId,
-      model: seadreamModel,
-      provider: "replicate",
-      latency_ms: latencyMs,
-      input_chars: (prompt || "").length,
-      output_chars: outputChars,
-      generation_id: generationId,
-    });
+      let providerUrls = [];
+      if (Array.isArray(output)) {
+        providerUrls = output
+          .map((item) => {
+            if (typeof item === "string") return item;
+            if (item && typeof item === "object") return item.url || item.image || null;
+            return null;
+          })
+          .filter(Boolean);
+      } else if (typeof output === "string") {
+        providerUrls = [output];
+      } else if (output && typeof output === "object") {
+        if (typeof output.url === "string") providerUrls = [output.url];
+        else if (Array.isArray(output.output)) providerUrls = output.output.filter((v) => typeof v === "string");
+      }
 
-    return res.json({
-      ok: true,
-      message: "Mina Editorial image generated (stored in R2).",
-      requestId,
-      prompt,
-      imageUrl,
-      imageUrls,
-      generationId,
-      sessionId,
-      passId,
-      credits: {
-        balance: spend.balance,
-        cost: imageCost,
-      },
-      gpt: {
-        usedFallback: promptResult.usedFallback,
-        error: promptResult.gptError,
-        styleProfile: finalStyleProfile,
-        styleProfileMeta,
-        imageTexts,
-        userMessage,
-      },
-    });
-  } catch (err) {
-    console.error("Error in /editorial/generate:", err);
+      if (!providerUrls.length) throw new Error("Image generation returned no URL.");
 
-    auditAiEvent(req, "ai_error", 500, {
-      request_id: requestId,
-      step: "vision",
-      input_type: safeString(req.body?.productImageUrl) ? "image" : "text",
-      output_type: "image",
-      model: SEADREAM_MODEL,
-      provider: "replicate",
-      latency_ms: Date.now() - startedAt,
-      generation_id: generationId,
-      detail: { error: err?.message },
-    });
+      const storedImages = await Promise.all(
+        providerUrls.map((u) =>
+          storeRemoteToR2Public({
+            remoteUrl: u,
+            kind: "generations",
+            customerId,
+          })
+        )
+      );
 
-    return res.status(500).json({
-      ok: false,
-      error: "EDITORIAL_GENERATION_ERROR",
-      message: err?.message || "Unexpected error during image generation.",
-      requestId,
-    });
+      const imageUrls = storedImages.map((s) => s.publicUrl);
+      const outputKey = storedImages[0]?.key || null;
+      const imageUrl = imageUrls[0] || null;
+
+      if (!imageUrl) throw new Error("R2 store failed (no public URL). Check R2_PUBLIC_BASE_URL.");
+
+      const spend = await sbAdjustCredits({
+        customerId,
+        delta: -imageCost,
+        reason: "image-generate",
+        source: "api",
+        refType: "generation",
+        refId: generationId,
+        reqUserId: req?.user?.userId,
+        reqEmail: req?.user?.email,
+      });
+
+      const latencyMs = Date.now() - startedAt;
+      const outputChars = imageUrls.join(",").length;
+
+      const generationRecord = {
+        id: generationId,
+        type: "image",
+        sessionId,
+        customerId,
+        platform,
+        prompt: prompt || "",
+        outputUrl: imageUrl,
+        outputKey,
+        createdAt: new Date().toISOString(),
+        meta: {
+          tone,
+          platform,
+          minaVisionEnabled,
+          stylePresetKey,
+          productImageUrl,
+          logoImageUrl,
+          styleImageUrls,
+          aspectRatio,
+          imageTexts,
+          userMessage,
+          requestId,
+          latencyMs,
+          inputChars: (prompt || "").length,
+          outputChars,
+          model: seadreamModel,
+          provider: "replicate",
+          status: "succeeded",
+          userId: req.user?.userId,
+          email: req.user?.email,
+        },
+      };
+
+      void sbUpsertGenerationBusiness(generationRecord).catch((e) =>
+        console.error("[supabase] generation upsert failed:", e?.message || e)
+      );
+
+      auditAiEvent(req, "ai_response", 200, {
+        request_id: requestId,
+        step: "vision",
+        input_type: productImageUrl ? "image" : "text",
+        output_type: "image",
+        r2_url: imageUrl,
+        session_id: sessionId,
+        customer_id: customerId,
+        model: seadreamModel,
+        provider: "replicate",
+        latency_ms: latencyMs,
+        input_chars: (prompt || "").length,
+        output_chars: outputChars,
+        generation_id: generationId,
+      });
+
+      return res.json({
+        ok: true,
+        message: "Mina Editorial image generated (stored in R2).",
+        requestId,
+        prompt,
+        imageUrl,
+        imageUrls,
+        generationId,
+        sessionId,
+        passId,
+        credits: {
+          balance: spend.balance,
+          cost: imageCost,
+        },
+        gpt: {
+          usedFallback: promptResult.usedFallback,
+          error: promptResult.gptError,
+          styleProfile: finalStyleProfile,
+          styleProfileMeta,
+          imageTexts,
+          userMessage,
+        },
+      });
+    } catch (err) {
+      console.error("Error in /editorial/generate:", err);
+
+      auditAiEvent(req, "ai_error", 500, {
+        request_id: requestId,
+        step: "vision",
+        input_type: safeString(req.body?.productImageUrl) ? "image" : "text",
+        output_type: "image",
+        model: SEADREAM_MODEL,
+        provider: "replicate",
+        latency_ms: Date.now() - startedAt,
+        generation_id: generationId,
+        detail: { error: err?.message },
+      });
+
+      return res.status(500).json({
+        ok: false,
+        error: "EDITORIAL_GENERATION_ERROR",
+        message: err?.message || "Unexpected error during image generation.",
+        requestId,
+      });
+    }
   }
-});
+};
+
+const editorialGenerateHandler = ENV.USE_MMA_SHIM ? editorialGenerateMmaShim : editorialGenerateLegacy;
+app.post("/editorial/generate", editorialGenerateHandler);
 // =======================
 // ---- Motion suggestion (textarea) — Supabase-only likes read
 // =======================
@@ -3700,7 +3796,7 @@ app.post("/motion/suggest", async (req, res) => {
 
     const body = req.body || {};
     const cfg = await getRuntimeConfig();
-    const gptModel = cfg?.models?.gpt || "gpt-5-mini";
+    const gptModel = cfg?.models?.gpt || "gpt-4.1-mini";
     const referenceImageUrl = safeString(body.referenceImageUrl);
 
     if (!referenceImageUrl) {
@@ -3840,6 +3936,109 @@ app.post("/motion/suggest", async (req, res) => {
       ok: false,
       error: "MOTION_SUGGESTION_ERROR",
       message: err?.message || "Unexpected error during motion suggestion.",
+      requestId,
+    });
+  }
+});
+
+// =======================
+// ---- Mina Motion (video) — MMA-backed shim for legacy frontend
+// =======================
+// Run the MMA video pipeline so legacy `/motion/generate` calls persist MEGA
+// generations/steps while keeping the current response contract.
+app.post("/motion/generate", async (req, res) => {
+  const requestId = `req_${Date.now()}_${uuidv4()}`;
+
+  try {
+    if (!sbEnabled()) {
+      return res.status(500).json({
+        ok: false,
+        error: "NO_DB",
+        message: "Supabase not configured",
+        requestId,
+      });
+    }
+
+    const body = req.body || {};
+    const lastImageUrl = safeString(body.lastImageUrl);
+    const motionDescription = safeString(body.motionDescription || body.text || body.motionBrief || "");
+
+    if (!lastImageUrl) {
+      return res.status(400).json({
+        ok: false,
+        error: "MISSING_LAST_IMAGE",
+        message: "lastImageUrl is required to create motion.",
+        requestId,
+      });
+    }
+
+    if (!motionDescription) {
+      return res.status(400).json({
+        ok: false,
+        error: "MISSING_MOTION_DESCRIPTION",
+        message: "Describe how Mina should move the scene.",
+        requestId,
+      });
+    }
+
+    const customerId = resolveCustomerId(req, body);
+    const platform = safeString(body.platform || "");
+    const aspectRatio = safeString(body.aspectRatio || body.motionAspectRatio || "");
+    const motionStyles = Array.isArray(body.motionStyles || body.motionStyleKeys)
+      ? (body.motionStyles || body.motionStyleKeys).filter(Boolean)
+      : [];
+
+    const result = await mmaController.runVideoAnimate({
+      customerId,
+      email: req?.user?.email || null,
+      userId: req?.user?.userId || null,
+      assets: { input_still_image_id: lastImageUrl, still_url: lastImageUrl },
+      inputs: {
+        motion_user_brief: motionDescription,
+        movement_style: motionStyles.join(", ") || safeString(body.movementStyle || ""),
+        platform,
+        aspect_ratio: aspectRatio,
+      },
+      mode: { platform, aspect_ratio: aspectRatio },
+      history: { vision_intelligence: !!body.minaVisionEnabled },
+      brief: motionDescription,
+      settings: aspectRatio ? { kling: { aspect_ratio: aspectRatio } } : {},
+    });
+
+    if (result?.passId) {
+      res.set("X-Mina-Pass-Id", result.passId);
+    }
+
+    const videoUrl = result?.outputs?.kling_video_url || null;
+    const prompt = result?.mma_vars?.prompts?.motion_prompt || motionDescription;
+    const creditsInfo = await sbGetCredits({
+      customerId,
+      reqUserId: req?.user?.userId,
+      reqEmail: req?.user?.email,
+    });
+
+    return res.json({
+      ok: true,
+      requestId,
+      generationId: result?.generationId,
+      passId: result?.passId || null,
+      prompt,
+      videoUrl,
+      sessionId: null,
+      gpt: {
+        userMessage: result?.mma_vars?.prompts?.motion_prompt || null,
+      },
+      credits:
+        creditsInfo.balance === null || creditsInfo.balance === undefined
+          ? undefined
+          : { balance: creditsInfo.balance },
+    });
+  } catch (err) {
+    console.error("Error in /motion/generate (mma shim):", err);
+    return res.status(500).json({
+      ok: false,
+      error: "MMA_MOTION_ERROR",
+      message: err?.message || "Unexpected error during motion generate.",
       requestId,
     });
   }

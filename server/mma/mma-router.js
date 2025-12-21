@@ -209,6 +209,11 @@ export default function createMmaRouter({
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
 
+    // Flush headers early to avoid any buffering before we start streaming.
+    if (typeof res.flushHeaders === "function") {
+      res.flushHeaders();
+    }
+
     try {
       const { data, error } = await supabaseAdmin
         .from("mega_generations")
