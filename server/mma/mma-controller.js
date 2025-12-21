@@ -792,4 +792,4 @@ export function registerSseClient(generationId, res, initial) {
 }
 
 
-✅ This removes the stub and runs GPT → Replicate (Seedream/Kling) → store to R2 public → finalize.
+ 
