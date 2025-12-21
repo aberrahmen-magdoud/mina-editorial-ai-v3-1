@@ -1962,7 +1962,7 @@ async function runChatWithFallback({
   systemMessage,
   userContent,
   fallbackPrompt,
-  model = "gpt-4.1-mini",
+  model = "gpt-5-mini",
   temperature = 0.9,
   maxTokens = 400,
 }) {
@@ -2260,7 +2260,7 @@ Also, after the prompt, output JSON with 'imageTexts' and 'userMessage'.
     systemMessage,
     userContent,
     fallbackPrompt,
-    model: cfg?.models?.gpt || "gpt-4.1-mini",
+    model: cfg?.models?.gpt || "gpt-5-mini",
     temperature: typeof g.temperature === "number" ? g.temperature : 0.8,
     maxTokens: Number.isFinite(g.max_tokens) ? g.max_tokens : 420,
   });
@@ -2361,7 +2361,7 @@ Write the final video generation prompt.
     systemMessage,
     userContent,
     fallbackPrompt,
-    model: cfg?.models?.gpt || "gpt-4.1-mini",
+    model: cfg?.models?.gpt || "gpt-5-mini",
     temperature: typeof g.temperature === "number" ? g.temperature : 0.8,
     maxTokens: Number.isFinite(g.max_tokens) ? g.max_tokens : 280,
   });
@@ -2504,7 +2504,7 @@ Write one single-sentence motion idea. If a user draft exists, rewrite it tighte
     systemMessage,
     userContent,
     fallbackPrompt,
-    model: cfg?.models?.gpt || "gpt-4.1-mini",
+    model: cfg?.models?.gpt || "gpt-5-mini",
     temperature: typeof g.temperature === "number" ? g.temperature : 0.8,
     maxTokens: Number.isFinite(g.max_tokens) ? g.max_tokens : 260,
   });
@@ -3936,6 +3936,109 @@ app.post("/motion/suggest", async (req, res) => {
       ok: false,
       error: "MOTION_SUGGESTION_ERROR",
       message: err?.message || "Unexpected error during motion suggestion.",
+      requestId,
+    });
+  }
+});
+
+// =======================
+// ---- Mina Motion (video) — MMA-backed shim for legacy frontend
+// =======================
+// Run the MMA video pipeline so legacy `/motion/generate` calls persist MEGA
+// generations/steps while keeping the current response contract.
+app.post("/motion/generate", async (req, res) => {
+  const requestId = `req_${Date.now()}_${uuidv4()}`;
+
+  try {
+    if (!sbEnabled()) {
+      return res.status(500).json({
+        ok: false,
+        error: "NO_DB",
+        message: "Supabase not configured",
+        requestId,
+      });
+    }
+
+    const body = req.body || {};
+    const lastImageUrl = safeString(body.lastImageUrl);
+    const motionDescription = safeString(body.motionDescription || body.text || body.motionBrief || "");
+
+    if (!lastImageUrl) {
+      return res.status(400).json({
+        ok: false,
+        error: "MISSING_LAST_IMAGE",
+        message: "lastImageUrl is required to create motion.",
+        requestId,
+      });
+    }
+
+    if (!motionDescription) {
+      return res.status(400).json({
+        ok: false,
+        error: "MISSING_MOTION_DESCRIPTION",
+        message: "Describe how Mina should move the scene.",
+        requestId,
+      });
+    }
+
+    const customerId = resolveCustomerId(req, body);
+    const platform = safeString(body.platform || "");
+    const aspectRatio = safeString(body.aspectRatio || body.motionAspectRatio || "");
+    const motionStyles = Array.isArray(body.motionStyles || body.motionStyleKeys)
+      ? (body.motionStyles || body.motionStyleKeys).filter(Boolean)
+      : [];
+
+    const result = await mmaController.runVideoAnimate({
+      customerId,
+      email: req?.user?.email || null,
+      userId: req?.user?.userId || null,
+      assets: { input_still_image_id: lastImageUrl, still_url: lastImageUrl },
+      inputs: {
+        motion_user_brief: motionDescription,
+        movement_style: motionStyles.join(", ") || safeString(body.movementStyle || ""),
+        platform,
+        aspect_ratio: aspectRatio,
+      },
+      mode: { platform, aspect_ratio: aspectRatio },
+      history: { vision_intelligence: !!body.minaVisionEnabled },
+      brief: motionDescription,
+      settings: aspectRatio ? { kling: { aspect_ratio: aspectRatio } } : {},
+    });
+
+    if (result?.passId) {
+      res.set("X-Mina-Pass-Id", result.passId);
+    }
+
+    const videoUrl = result?.outputs?.kling_video_url || null;
+    const prompt = result?.mma_vars?.prompts?.motion_prompt || motionDescription;
+    const creditsInfo = await sbGetCredits({
+      customerId,
+      reqUserId: req?.user?.userId,
+      reqEmail: req?.user?.email,
+    });
+
+    return res.json({
+      ok: true,
+      requestId,
+      generationId: result?.generationId,
+      passId: result?.passId || null,
+      prompt,
+      videoUrl,
+      sessionId: null,
+      gpt: {
+        userMessage: result?.mma_vars?.prompts?.motion_prompt || null,
+      },
+      credits:
+        creditsInfo.balance === null || creditsInfo.balance === undefined
+          ? undefined
+          : { balance: creditsInfo.balance },
+    });
+  } catch (err) {
+    console.error("Error in /motion/generate (mma shim):", err);
+    return res.status(500).json({
+      ok: false,
+      error: "MMA_MOTION_ERROR",
+      message: err?.message || "Unexpected error during motion generate.",
       requestId,
     });
   }
