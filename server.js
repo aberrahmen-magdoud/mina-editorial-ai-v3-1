@@ -623,7 +623,7 @@ const DEFAULT_RUNTIME_CONFIG = {
   models: {
     seadream: process.env.SEADREAM_MODEL_VERSION || "bytedance/seedream-4",
     kling: process.env.KLING_MODEL_VERSION || "kwaivgi/kling-v2.1",
-    gpt: "gpt-4.1-mini",
+    gpt: "gpt-5-mini",
   },
   credits: {
     imageCost: Number(process.env.IMAGE_CREDITS_COST || 1),
@@ -1870,7 +1870,7 @@ async function runChatWithFallback({
   systemMessage,
   userContent,
   fallbackPrompt,
-  model = "gpt-4.1-mini",
+  model = "gpt-5-mini",
   temperature = 0.9,
   maxTokens = 400,
 }) {
@@ -2168,7 +2168,7 @@ Also, after the prompt, output JSON with 'imageTexts' and 'userMessage'.
     systemMessage,
     userContent,
     fallbackPrompt,
-    model: cfg?.models?.gpt || "gpt-4.1-mini",
+    model: cfg?.models?.gpt || "gpt-5-mini",
     temperature: typeof g.temperature === "number" ? g.temperature : 0.8,
     maxTokens: Number.isFinite(g.max_tokens) ? g.max_tokens : 420,
   });
@@ -2269,7 +2269,7 @@ Write the final video generation prompt.
     systemMessage,
     userContent,
     fallbackPrompt,
-    model: cfg?.models?.gpt || "gpt-4.1-mini",
+    model: cfg?.models?.gpt || "gpt-5-mini",
     temperature: typeof g.temperature === "number" ? g.temperature : 0.8,
     maxTokens: Number.isFinite(g.max_tokens) ? g.max_tokens : 280,
   });
@@ -2412,7 +2412,7 @@ Write one single-sentence motion idea. If a user draft exists, rewrite it tighte
     systemMessage,
     userContent,
     fallbackPrompt,
-    model: cfg?.models?.gpt || "gpt-4.1-mini",
+    model: cfg?.models?.gpt || "gpt-5-mini",
     temperature: typeof g.temperature === "number" ? g.temperature : 0.8,
     maxTokens: Number.isFinite(g.max_tokens) ? g.max_tokens : 260,
   });
@@ -3700,7 +3700,7 @@ app.post("/motion/suggest", async (req, res) => {
 
     const body = req.body || {};
     const cfg = await getRuntimeConfig();
-    const gptModel = cfg?.models?.gpt || "gpt-4.1-mini";
+    const gptModel = cfg?.models?.gpt || "gpt-5-mini";
     const referenceImageUrl = safeString(body.referenceImageUrl);
 
     if (!referenceImageUrl) {
