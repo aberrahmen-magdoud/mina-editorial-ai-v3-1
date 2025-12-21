@@ -397,32 +397,43 @@ async function gptMakePrompts({ mode, vars, preferences }) {
     .filter(Boolean)
     .join("\n");
 
+  const model = cfg.gptModel;
+  const temperature = 0.4;
+
   const resp = await openai.chat.completions.create({
-    model: cfg.gptModel,
+    model,
     messages: [
       { role: "system", content: sys },
       { role: "user", content: user },
     ],
-    temperature: 0.4,
+    temperature,
   });
 
   const text = resp?.choices?.[0]?.message?.content || "";
-  // best-effort JSON parse
+
+  let clean_prompt = "";
+  let motion_prompt = "";
+
   try {
     const parsed = JSON.parse(text);
-    return {
-      clean_prompt: typeof parsed.clean_prompt === "string" ? parsed.clean_prompt : "",
-      motion_prompt: typeof parsed.motion_prompt === "string" ? parsed.motion_prompt : "",
-      raw: text,
-    };
+    clean_prompt = typeof parsed.clean_prompt === "string" ? parsed.clean_prompt : "";
+    motion_prompt = typeof parsed.motion_prompt === "string" ? parsed.motion_prompt : "";
   } catch {
-    // fallback: treat as single prompt
-    return {
-      clean_prompt: mode === "still" ? text : "",
-      motion_prompt: mode === "video" ? text : "",
-      raw: text,
-    };
+    clean_prompt = mode === "still" ? text : "";
+    motion_prompt = mode === "video" ? text : "";
   }
+
+  return {
+    clean_prompt,
+    motion_prompt,
+    raw: text,
+    debug: {
+      model,
+      temperature,
+      system: sys,
+      user,
+    },
+  };
 }
 
 async function runProductionPipeline({ supabase, generationId, vars, mode, preferences }) {
@@ -456,8 +467,14 @@ async function runProductionPipeline({ supabase, generationId, vars, mode, prefe
         input: {
           brief: working?.inputs?.brief || working?.inputs?.motionDescription || "",
           preferences,
+          gpt: prompts?.debug || null, // ✅ system + user + model + temp
         },
-        output: { clean_prompt: prompts.clean_prompt, motion_prompt: prompts.motion_prompt },
+        output: {
+          clean_prompt: prompts.clean_prompt,
+          motion_prompt: prompts.motion_prompt,
+          raw: prompts.raw, // ✅ raw model response
+        },
+        mma_config: getMmaConfig(), // ✅ config snapshot
         timing: { started_at: new Date(t0).toISOString(), ended_at: nowIso(), duration_ms: Date.now() - t0 },
         error: null,
       },
