@@ -1,4 +1,4 @@
-// Hero Part 3: Express router for Mina Mind API
+// ./server/mma/mma-router.js Part 3: Express router for Mina Mind API
 // Part 3.1: Routes fan out to controller helpers and expose SSE replay.
 import express from "express";
 import {
