@@ -131,6 +131,38 @@ app.use((_req, res, next) => {
   res.set("Access-Control-Expose-Headers", headers.join(", "));
   next();
 });
+// ======================================================
+// Public stats (used by AuthGate UI)
+// ======================================================
+app.get("/public/stats/total-users", async (_req, res) => {
+  try {
+    // If Supabase isn't configured, still return a valid response
+    if (!sbEnabled()) {
+      return res.status(200).json({ ok: true, totalUsers: 0, degraded: true });
+    }
+
+    const supabase = getSupabaseAdmin();
+    const { count, error } = await supabase
+      .from("mega_customers")
+      .select("mg_pass_id", { count: "exact", head: true });
+
+    if (error) throw error;
+
+    return res.status(200).json({
+      ok: true,
+      totalUsers: count ?? 0,
+      source: "mega_customers",
+    });
+  } catch (e) {
+    console.error("GET /public/stats/total-users failed", e);
+    return res.status(200).json({
+      ok: true,
+      totalUsers: 0,
+      degraded: true,
+      degradedReason: e?.message || String(e),
+    });
+  }
+});
 
 // ======================================================
 // Shopify webhook (RAW body + HMAC verify) — MEGA credits
