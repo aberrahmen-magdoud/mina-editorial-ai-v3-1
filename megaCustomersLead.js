@@ -1,51 +1,72 @@
-// megaCustomersLead.js (ESM)
-import { getSupabaseAdmin } from "./supabase.js";
+// src/megaCustomersLead.js
+// Small helper used by /auth/shopify-sync (lead capture).
+// Keeps MEGA customer identity aligned with passId/email.
+// No UI/UX impact — backend only.
 
-function cleanStr(v) {
-  const s = String(v || "").trim();
-  return s || null;
+"use strict";
+
+import crypto from "node:crypto";
+import { sbEnabled } from "./supabase.js";
+import { megaEnsureCustomer } from "./mega-db.js";
+
+function safeString(v, fallback = "") {
+  if (v === null || v === undefined) return fallback;
+  const s = typeof v === "string" ? v : String(v);
+  const t = s.trim();
+  return t ? t : fallback;
 }
 
-function cleanEmail(v) {
-  const e = String(v || "").trim().toLowerCase();
+export function normalizeEmail(email) {
+  const e = safeString(email, "").toLowerCase();
   return e || null;
 }
 
+export function canonicalizePassId({ passId, email } = {}) {
+  const pid = safeString(passId, "");
+  if (pid) return pid;
+
+  const cleanEmail = normalizeEmail(email);
+  if (cleanEmail) return `pass:email:${cleanEmail}`;
+
+  return `pass:anon:${crypto.randomUUID()}`;
+}
+
 /**
- * Upsert-ish behavior without requiring UNIQUE constraints:
- * - if mg_user_id exists -> update that row
- * - else if mg_email exists -> update that row
- * - else insert
- *
- * Columns we use:
- * - mg_user_id (already used in your auth.js)
- * - mg_email   (already used in your auth.js)
- * - mg_pass_id (we'll add)
- * - mg_shopify_customer_id (we'll add)
+ * Upsert/link a MEGA customer row (lead capture).
+ * - Does NOT authenticate with Shopify
+ * - Does NOT change your login flow
+ * - Safe to call even when Supabase is disabled (returns degraded)
  */
-export async function upsertMegaCustomerLead({ userId, email, passId, shopifyCustomerId }) {
-  const supabase = getSupabaseAdmin();
-  if (!supabase) return { ok: false, error: "missing_supabase_admin" };
+export async function upsertMegaCustomerLead({
+  passId = null,
+  email = null,
+  userId = null,
+  shopifyCustomerId = null,
+  source = "shopify-sync",
+} = {}) {
+  const cleanEmail = normalizeEmail(email);
+  const pid = canonicalizePassId({ passId, email: cleanEmail });
 
-  const mg_user_id = cleanStr(userId);
-  const mg_email = cleanEmail(email);
-  const mg_pass_id = cleanStr(passId);
-  const mg_shopify_customer_id = cleanStr(shopifyCustomerId);
-
-  // if nothing to store, skip silently
-  if (!mg_user_id && !mg_email && !mg_pass_id && !mg_shopify_customer_id) {
-    return { ok: true, skipped: true };
+  // If Supabase isn’t configured, we still return ok so AuthGate never breaks.
+  if (!sbEnabled()) {
+    return {
+      ok: true,
+      passId: pid,
+      degraded: true,
+      degradedReason: "NO_SUPABASE",
+    };
   }
 
-  const patch = {
-    ...(mg_user_id ? { mg_user_id } : {}),
-    ...(mg_email ? { mg_email } : {}),
-    ...(mg_pass_id ? { mg_pass_id } : {}),
-    ...(mg_shopify_customer_id ? { mg_shopify_customer_id } : {}),
-    mg_updated_at: new Date().toISOString(),
-  };
+  // Use your existing MEGA helper so schema stays centralized.
+  await megaEnsureCustomer({
+    passId: pid,
+    email: cleanEmail,
+    userId: userId ? String(userId) : null,
+    shopifyCustomerId: shopifyCustomerId ? String(shopifyCustomerId) : null,
+    source,
+  });
 
-  try {
-    // 1) try by user id
-    if (mg_user_id) {
-      const { data } = awai
+  return { ok: true, passId: pid };
+}
+
+export default upsertMegaCustomerLead;
