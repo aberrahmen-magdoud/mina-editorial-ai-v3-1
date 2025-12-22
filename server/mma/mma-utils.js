@@ -1,4 +1,4 @@
-// Hero Part 1: Utility helpers for Mina Mind API (MMA)
+// ./server/mma/mma-utils.js Part 1: Utility helpers for Mina Mind API (MMA)
 // Part 1.1: Deterministic pass id + canonical var maps live here so server.js stays slim.
 import crypto from "node:crypto";
 import { v4 as uuidv4 } from "uuid";
