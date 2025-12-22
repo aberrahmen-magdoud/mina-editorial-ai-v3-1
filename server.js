@@ -336,6 +336,11 @@ app.use(express.json({ limit: "25mb" }));
 app.use(express.urlencoded({ extended: true, limit: "25mb" }));
 
 // ======================================================
+// Shopify lead capture (optional) — does NOT affect auth UI
+// ======================================================
+registerShopifySync(app);
+
+// ======================================================
 // Auth helper (service role validates a user token)
 // ======================================================
 function getBearerToken(req) {
