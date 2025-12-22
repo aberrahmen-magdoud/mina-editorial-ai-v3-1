@@ -1,4 +1,4 @@
-// src/routes/mma/mma-controller.js
+// ./server/mma/mma-controller.js
 import express from "express";
 import OpenAI from "openai";
 import Replicate from "replicate";
