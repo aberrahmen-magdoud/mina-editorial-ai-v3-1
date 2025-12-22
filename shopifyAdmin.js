@@ -1,33 +1,42 @@
-// shopifyAdmin.js
+// shopifyAdmin.js (ESM) — Shopify Admin API helpers used by /auth/shopify-sync
 "use strict";
 
-// Tiny Shopify Admin helpers used by /auth/shopify-sync
-// This is NOT "Shopify auth". It's optional lead-capture + tagging.
-// Safe: if Shopify env is missing, functions return ok:false (no crashes).
+const ENV = process.env;
 
-const SHOPIFY_STORE_DOMAIN = process.env.SHOPIFY_STORE_DOMAIN || "";
-const SHOPIFY_ADMIN_TOKEN = process.env.SHOPIFY_ADMIN_TOKEN || "";
-const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || "2025-10";
-export const SHOPIFY_MINA_TAG = process.env.SHOPIFY_MINA_TAG || "Mina_users";
+const SHOPIFY_STORE_DOMAIN = String(ENV.SHOPIFY_STORE_DOMAIN || "").trim(); // MUST be *.myshopify.com
+const SHOPIFY_ADMIN_TOKEN = String(ENV.SHOPIFY_ADMIN_TOKEN || "").trim();
+const SHOPIFY_API_VERSION = String(ENV.SHOPIFY_API_VERSION || "2025-10").trim();
+const SHOPIFY_MINA_TAG = String(ENV.SHOPIFY_MINA_TAG || "Mina_users").trim();
+
+function isConfigured() {
+  return !!(SHOPIFY_STORE_DOMAIN && SHOPIFY_ADMIN_TOKEN);
+}
 
 function normalizeEmail(email) {
   const e = String(email || "").trim().toLowerCase();
   return e || null;
 }
 
-export function shopifyConfigured() {
-  return !!(SHOPIFY_STORE_DOMAIN && SHOPIFY_ADMIN_TOKEN);
+export function getShopifyConfig() {
+  return {
+    configured: isConfigured(),
+    storeDomain: SHOPIFY_STORE_DOMAIN || null,
+    apiVersion: SHOPIFY_API_VERSION,
+    tag: SHOPIFY_MINA_TAG,
+  };
 }
 
 export async function shopifyAdminFetch(path, { method = "GET", body = null } = {}) {
-  if (!shopifyConfigured()) {
+  if (!isConfigured()) {
     const err = new Error("SHOPIFY_NOT_CONFIGURED");
-    err.status = 503;
+    err.code = "SHOPIFY_NOT_CONFIGURED";
     throw err;
   }
 
-  const cleanPath = String(path || "").replace(/^\/+/, "");
-  const url = `https://${SHOPIFY_STORE_DOMAIN}/admin/api/${SHOPIFY_API_VERSION}/${cleanPath}`;
+  const url = `https://${SHOPIFY_STORE_DOMAIN}/admin/api/${SHOPIFY_API_VERSION}/${String(path).replace(
+    /^\/+/,
+    ""
+  )}`;
 
   const resp = await fetch(url, {
     method,
@@ -43,9 +52,7 @@ export async function shopifyAdminFetch(path, { method = "GET", body = null } = 
   let json = null;
   try {
     json = text ? JSON.parse(text) : null;
-  } catch {
-    json = null;
-  }
+  } catch {}
 
   if (!resp.ok) {
     const err = new Error(`SHOPIFY_${resp.status}`);
@@ -58,37 +65,36 @@ export async function shopifyAdminFetch(path, { method = "GET", body = null } = 
 }
 
 export async function findCustomerIdByEmail(email) {
-  const clean = normalizeEmail(email);
-  if (!clean) return null;
-  if (!shopifyConfigured()) return null;
+  const e = normalizeEmail(email);
+  if (!e) return null;
 
-  // REST search endpoint
-  const q = encodeURIComponent(`email:${clean}`);
-  const json = await shopifyAdminFetch(`customers/search.json?query=${q}`, { method: "GET" });
+  const q = encodeURIComponent(`email:${e}`);
+  const json = await shopifyAdminFetch(`customers/search.json?query=${q}`);
 
   const customers = Array.isArray(json?.customers) ? json.customers : [];
-  const first = customers[0];
-  const id = first?.id != null ? String(first.id) : null;
+  if (!customers.length) return null;
+
+  // Prefer exact email match if multiple results
+  const hit =
+    customers.find((c) => String(c?.email || "").trim().toLowerCase() === e) || customers[0];
+
+  const id = hit?.id != null ? String(hit.id) : null;
   return id || null;
 }
 
 export async function addCustomerTag(customerId, tag = SHOPIFY_MINA_TAG) {
-  if (!shopifyConfigured()) return { ok: false, error: "SHOPIFY_NOT_CONFIGURED" };
-
   const id = String(customerId || "").trim();
   const t = String(tag || "").trim();
-  if (!id || !t) return { ok: false, error: "MISSING_INPUT" };
+  if (!id || !t) return { ok: false };
 
-  const get = await shopifyAdminFetch(`customers/${id}.json`, { method: "GET" });
+  const get = await shopifyAdminFetch(`customers/${id}.json`);
   const existingStr = get?.customer?.tags || "";
-  const existing = existingStr
+  const existing = String(existingStr)
     .split(",")
     .map((x) => x.trim())
     .filter(Boolean);
 
-  if (existing.includes(t)) {
-    return { ok: true, already: true, customerId: id, tags: existing };
-  }
+  if (existing.includes(t)) return { ok: true, already: true, tags: existing };
 
   const nextTags = [...existing, t].join(", ");
   await shopifyAdminFetch(`customers/${id}.json`, {
@@ -96,21 +102,24 @@ export async function addCustomerTag(customerId, tag = SHOPIFY_MINA_TAG) {
     body: { customer: { id: Number(id), tags: nextTags } },
   });
 
-  return { ok: true, already: false, customerId: id, tags: [...existing, t] };
+  return { ok: true, already: false, tags: [...existing, t] };
 }
 
 /**
- * ✅ This is the missing export your server is importing.
- * Finds Shopify customer by email, tags them, returns status.
+ * Main helper for /auth/shopify-sync.
+ * Returns customerId if found + tagged, otherwise null.
+ * If Shopify env/token are wrong -> throws (so you’ll see it in logs).
  */
-export async function findAndTagCustomerByEmail(email, tag = SHOPIFY_MINA_TAG) {
-  const clean = normalizeEmail(email);
-  if (!clean) return { ok: false, error: "MISSING_EMAIL" };
-  if (!shopifyConfigured()) return { ok: false, error: "SHOPIFY_NOT_CONFIGURED" };
+export async function findAndTagCustomerByEmail(email, { tag = SHOPIFY_MINA_TAG } = {}) {
+  const e = normalizeEmail(email);
+  if (!e) return null;
 
-  const customerId = await findCustomerIdByEmail(clean);
-  if (!customerId) return { ok: false, error: "NOT_FOUND" };
+  // If Shopify isn't configured, treat as "disabled" (non-blocking)
+  if (!isConfigured()) return null;
 
-  const out = await addCustomerTag(customerId, tag);
-  return { ...out, ok: true, customerId };
+  const customerId = await findCustomerIdByEmail(e);
+  if (!customerId) return null;
+
+  await addCustomerTag(customerId, tag);
+  return customerId;
 }
