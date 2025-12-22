@@ -111,7 +111,7 @@ process.on("uncaughtException", async (err) => {
 // ======================================================
 // CORS (your API CORS, NOT R2 CORS)
 // ======================================================
-const defaultAllowlist = ["http://mina.faltastudio.com", "https://mina-app-bvpn.onrender.com"];
+const defaultAllowlist = ["https://mina.faltastudio.com", "https://mina-app-bvpn.onrender.com"];
 const envAllowlist = (ENV.CORS_ORIGINS || "")
   .split(",")
   .map((s) => s.trim())
@@ -690,43 +690,41 @@ app.post("/feedback", async (req, res) => {
     return res.status(500).json({ ok: false, requestId, error: "FEEDBACK_FAILED", message: e?.message || String(e) });
   }
 });
-// ============================
-// [ADD WHOLE BLOCK] /auth/shopify-sync
-// Put this in server.js after your JSON middleware is set up
-// ============================
-app.post("/auth/shopify-sync", express.json(), async (req, res) => {
+// ======================================================
+// Shopify sync (frontend calls this; must NOT 404)
+// Returns a passId that matches the rest of the API: pass:user:<supabaseUserId>
+// ======================================================
+app.post("/auth/shopify-sync", async (req, res) => {
   try {
-    // Grab Bearer token if present
-    const auth = String(req.headers.authorization || "");
-    const jwt = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+    const authUser = await getAuthUser(req);
 
-    // If no JWT or no Supabase admin client, just respond OK (no-op)
-    // (This stops the frontend 404 spam.)
-    if (!jwt || !process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
-      return res.json({ ok: true, skipped: true });
+    // If user isn't logged in yet, don't error (just say ok)
+    if (!authUser?.userId) {
+      return res.status(200).json({ ok: true, loggedIn: false });
     }
 
-    // Create a Supabase server client (service role can verify JWT via getUser)
-    const { createClient } = await import("@supabase/supabase-js");
-    const sb = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, {
-      auth: { persistSession: false },
+    const passId = normalizeIncomingPassId(`pass:user:${authUser.userId}`);
+
+    // Important: tell the browser the pass id
+    res.set("X-Mina-Pass-Id", passId);
+
+    // Optional: link this user into MEGA (safe)
+    if (sbEnabled()) {
+      await megaEnsureCustomer({ passId, userId: authUser.userId, email: authUser.email || null });
+    }
+
+    return res.status(200).json({
+      ok: true,
+      loggedIn: true,
+      passId,
+      email: authUser.email || null,
     });
-
-    const { data, error } = await sb.auth.getUser(jwt);
-    if (error || !data?.user) {
-      return res.status(401).json({ ok: false, message: "Unauthorized" });
-    }
-
-    // Use Supabase user.id as your stable passId everywhere
-    const passId = data.user.id;
-    const email = data.user.email || null;
-
-    return res.json({ ok: true, passId, email });
   } catch (e) {
-    return res.status(500).json({ ok: false, message: e?.message || "shopify-sync failed" });
+    // Never break the app if sync fails
+    return res.status(200).json({ ok: true, loggedIn: false, degraded: true });
   }
 });
-z
+
 // ======================================================
 // MMA API (primary)
 // ======================================================
