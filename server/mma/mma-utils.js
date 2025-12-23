@@ -1,13 +1,46 @@
-// ./server/mma/mma-utils.js Part 1: Utility helpers for Mina Mind API (MMA)
+// ./server/mma/mma-utils.js
+// Part 1: Utility helpers for Mina Mind API (MMA)
 // Part 1.1: Deterministic pass id + canonical var maps live here so server.js stays slim.
+
 import crypto from "node:crypto";
 import { v4 as uuidv4 } from "uuid";
 
+// -----------------------------------------------------------------------------
+// Editable behavior flags (keep at top so you can tweak easily)
+// -----------------------------------------------------------------------------
+const MMA_VERSION = "2025-12-23";
+
+// Keep current behavior by default to avoid breaking existing customers.
+// If you ever want to stop storing plaintext emails inside passId, set:
+// MMA_PASSID_HASH_EMAIL=true  (⚠️ will create new passIds for same users)
+const MMA_PASSID_HASH_EMAIL = String(process.env.MMA_PASSID_HASH_EMAIL || "").toLowerCase() === "true";
+
+// -----------------------------------------------------------------------------
+// Small helpers
+// -----------------------------------------------------------------------------
 function safeString(v, fallback = "") {
   if (v === null || v === undefined) return fallback;
   return String(v).trim() || fallback;
 }
 
+function asArray(v) {
+  return Array.isArray(v) ? v : [];
+}
+
+function asStrOrNull(v) {
+  const s = safeString(v, "");
+  return s ? s : null;
+}
+
+function hashEmail(email) {
+  const e = safeString(email, "").toLowerCase();
+  if (!e) return "";
+  return crypto.createHash("sha256").update(e).digest("hex").slice(0, 40);
+}
+
+// -----------------------------------------------------------------------------
+// PassId
+// -----------------------------------------------------------------------------
 export function computePassId({ shopifyCustomerId, userId, email }) {
   const normalizedShopify = safeString(shopifyCustomerId, "");
   if (normalizedShopify && normalizedShopify !== "anonymous") {
@@ -18,11 +51,19 @@ export function computePassId({ shopifyCustomerId, userId, email }) {
   if (normalizedUser) return `pass:user:${normalizedUser}`;
 
   const normalizedEmail = safeString(email, "").toLowerCase();
-  if (normalizedEmail) return `pass:email:${normalizedEmail}`;
+  if (normalizedEmail) {
+    if (MMA_PASSID_HASH_EMAIL) return `pass:emailhash:${hashEmail(normalizedEmail)}`;
+    return `pass:email:${normalizedEmail}`;
+  }
 
+  // If frontend doesn't send passId, we generate a random anon one (non-sticky).
+  // In production, prefer passing passId from client for a consistent identity.
   return `pass:anon:${crypto.randomUUID()}`;
 }
 
+// -----------------------------------------------------------------------------
+// Vars canonicalizer (single source of truth for pipelines)
+// -----------------------------------------------------------------------------
 export function makeInitialVars({
   mode = "still",
   assets = {},
@@ -32,46 +73,90 @@ export function makeInitialVars({
   feedback = {},
   settings = {},
 } = {}) {
-  // Keep BOTH ids + urls (so pipeline can run without extra lookups)
-  const productUrl =
-    assets.productImageUrl || assets.product_image_url || assets.product_url || null;
+  // --------
+  // Assets: URLs
+  // --------
+  const productUrl = asStrOrNull(assets.productImageUrl || assets.product_image_url || assets.product_url);
+  const logoUrl = asStrOrNull(assets.logoImageUrl || assets.logo_image_url || assets.logo_url);
 
-  const logoUrl =
-    assets.logoImageUrl || assets.logo_image_url || assets.logo_url || null;
+  // Inspirations may arrive under many keys (frontend + older names)
+  const inspirationUrls = []
+    .concat(asArray(assets.inspiration_image_urls))
+    .concat(asArray(assets.inspirationImageUrls))
+    .concat(asArray(assets.style_image_urls))
+    .concat(asArray(assets.styleImageUrls))
+    .concat(asArray(assets.inspiration_urls))
+    .filter((x) => typeof x === "string" && x.trim());
 
-  const styleUrls =
-    assets.styleImageUrls ||
-    assets.style_image_urls ||
-    assets.inspiration_urls ||
-    [];
+  const styleHeroUrl = asStrOrNull(
+    assets.style_hero_image_url ||
+      assets.styleHeroImageUrl ||
+      assets.style_hero_url ||
+      assets.styleHeroUrl
+  );
 
-  const klingUrls =
-    assets.kling_images ||
-    assets.klingImages ||
-    assets.kling_image_urls ||
-    [];
+  // Kling reference images (optional, besides start/end)
+  const klingUrls = []
+    .concat(asArray(assets.kling_images))
+    .concat(asArray(assets.klingImages))
+    .concat(asArray(assets.kling_image_urls))
+    .filter((x) => typeof x === "string" && x.trim());
 
-  const startUrl =
-    assets.start_image_url || assets.startImageUrl || null;
+  const startUrl = asStrOrNull(assets.start_image_url || assets.startImageUrl);
+  const endUrl = asStrOrNull(assets.end_image_url || assets.endImageUrl);
 
-  const endUrl =
-    assets.end_image_url || assets.endImageUrl || null;
+  // --------
+  // Inputs canonical fields
+  // --------
+  const brief = safeString(inputs.brief || inputs.userBrief || inputs.prompt, "");
 
-  const brief =
-    inputs.brief ||
-    inputs.userBrief ||
-    inputs.prompt ||
-    "";
-
-  const motionDescription =
-    inputs.motion_description ||
-    inputs.motionDescription ||
+  // Motion brief can come in many forms
+  const motionUserBrief = safeString(
     inputs.motion_user_brief ||
-    "";
+      inputs.motionBrief ||
+      inputs.motion_description ||
+      inputs.motionDescription ||
+      "",
+    ""
+  );
+
+  // Movement style: prefer selected_movement_style (your spec)
+  const selectedMovementStyle = safeString(
+    inputs.selected_movement_style ||
+      inputs.movement_style ||
+      inputs.movementStyle ||
+      "",
+    ""
+  );
+
+  // Suggest flags used in your video pipeline
+  const typeForMe = inputs.type_for_me ?? inputs.typeForMe ?? inputs.use_suggestion ?? false;
+  const suggestOnly = inputs.suggest_only ?? inputs.suggestOnly ?? false;
+
+  // --------
+  // Prompts canonical fields
+  // --------
+  const cleanPrompt = prompts.clean_prompt || prompts.cleanPrompt || null;
+  const motionPrompt = prompts.motion_prompt || prompts.motionPrompt || null;
+
+  // IMPORTANT: your controller uses `sugg_prompt`
+  const suggPrompt =
+    prompts.sugg_prompt ||
+    prompts.suggPrompt ||
+    prompts.motion_sugg_prompt ||
+    prompts.motionSuggPrompt ||
+    null;
+
+  // --------
+  // History
+  // --------
+  const visionIntelligence = history.vision_intelligence ?? true;
+  const likeWindow = visionIntelligence === false ? 20 : 5;
 
   return {
-    version: "2025-12-21",
+    version: MMA_VERSION,
     mode,
+
     assets: {
       // legacy ids (kept)
       product_image_id: assets.product_image_id || null,
@@ -80,14 +165,22 @@ export function makeInitialVars({
       style_hero_image_id: assets.style_hero_image_id || null,
       input_still_image_id: assets.input_still_image_id || null,
 
-      // ✅ urls (NEW)
-      product_image_url: typeof productUrl === "string" ? productUrl : null,
-      logo_image_url: typeof logoUrl === "string" ? logoUrl : null,
-      style_image_urls: Array.isArray(styleUrls) ? styleUrls : [],
-      kling_image_urls: Array.isArray(klingUrls) ? klingUrls : [],
-      start_image_url: typeof startUrl === "string" ? startUrl : null,
-      end_image_url: typeof endUrl === "string" ? endUrl : null,
+      // ✅ urls (canonical)
+      product_image_url: productUrl,
+      logo_image_url: logoUrl,
+
+      // Store inspirations in BOTH names so older code keeps working
+      inspiration_image_urls: inspirationUrls,
+      style_image_urls: inspirationUrls,
+
+      style_hero_image_url: styleHeroUrl,
+
+      // Kling helpers
+      kling_image_urls: klingUrls,
+      start_image_url: startUrl,
+      end_image_url: endUrl,
     },
+
     scans: {
       product_crt: null,
       logo_crt: null,
@@ -95,49 +188,97 @@ export function makeInitialVars({
       still_crt: null,
       output_still_crt: null,
     },
+
     history: {
-      vision_intelligence: history.vision_intelligence ?? true,
-      like_window: history.vision_intelligence === false ? 20 : 5,
+      vision_intelligence: visionIntelligence,
+      like_window: likeWindow,
       style_history_csv: history.style_history_csv || null,
     },
+
     inputs: {
       // ✅ canonical fields your controller reads
       brief,
-      motion_description: motionDescription,
-      motionDescription,
 
-      // keep your existing fields too
-      userBrief: inputs.userBrief || "",
-      style: inputs.style || "",
-      motion_user_brief: inputs.motion_user_brief || "",
-      movement_style: inputs.movement_style || "",
+      motion_user_brief: motionUserBrief,
+      selected_movement_style: selectedMovementStyle,
 
-      platform: inputs.platform || inputs.platformKey || "",
-      aspect_ratio: inputs.aspect_ratio || inputs.aspectRatio || "",
+      // mirror start/end here too (makes motion ctx wiring easier)
+      start_image_url: asStrOrNull(inputs.start_image_url || inputs.startImageUrl) || startUrl,
+      end_image_url: asStrOrNull(inputs.end_image_url || inputs.endImageUrl) || endUrl,
+
+      // suggestion controls (video “Type for me”)
+      type_for_me: !!typeForMe,
+      suggest_only: !!suggestOnly,
+
+      // keep old fields too
+      userBrief: safeString(inputs.userBrief, ""),
+      style: safeString(inputs.style, ""),
+      movement_style: safeString(inputs.movement_style, ""), // legacy
+
+      platform: safeString(inputs.platform || inputs.platformKey, ""),
+      aspect_ratio: safeString(inputs.aspect_ratio || inputs.aspectRatio, ""),
+      duration: inputs.duration ?? null,
+      mode: safeString(inputs.mode || inputs.kling_mode, ""),
+      negative_prompt: safeString(inputs.negative_prompt || inputs.negativePrompt, ""),
     },
+
     prompts: {
-      clean_prompt: prompts.clean_prompt || null,
-      motion_prompt: prompts.motion_prompt || null,
-      motion_sugg_prompt: prompts.motion_sugg_prompt || null,
+      clean_prompt: cleanPrompt,
+      motion_prompt: motionPrompt,
+
+      // ✅ canonical for video suggestion flow
+      sugg_prompt: suggPrompt,
+
+      // legacy alias preserved
+      motion_sugg_prompt: suggPrompt,
     },
+
     feedback: {
-      still_feedback: feedback.still_feedback || null,
-      motion_feedback: feedback.motion_feedback || null,
+      still_feedback: feedback.still_feedback || feedback.feedback_still || null,
+      motion_feedback: feedback.motion_feedback || feedback.feedback_motion || null,
     },
+
     userMessages: { scan_lines: [], final_line: null },
-    settings: { seedream: settings.seedream || {}, kling: settings.kling || {} },
-    outputs: { seedream_image_id: null, kling_video_id: null },
+
+    settings: {
+      seedream: settings.seedream || {},
+      kling: settings.kling || {},
+    },
+
+    outputs: {
+      // urls your pipelines write
+      seedream_image_url: null,
+      kling_video_url: null,
+
+      // legacy ids (optional)
+      seedream_image_id: null,
+      kling_video_id: null,
+    },
+
     meta: { ctx_versions: {}, settings_versions: {} },
   };
 }
 
+// -----------------------------------------------------------------------------
+// Scan line helper (if you ever want to use it instead of controller helper)
+// -----------------------------------------------------------------------------
 export function appendScanLine(vars, text) {
-  const next = { ...(vars || makeInitialVars({})), userMessages: { ...(vars?.userMessages || { scan_lines: [], final_line: null }) } };
+  const base = vars && typeof vars === "object" ? vars : makeInitialVars({});
+  const next = {
+    ...base,
+    userMessages: {
+      ...(base.userMessages || { scan_lines: [], final_line: null }),
+    },
+  };
+
   const scanLines = Array.isArray(next.userMessages.scan_lines)
     ? [...next.userMessages.scan_lines]
     : [];
-  const payload = typeof text === "string" ? { index: scanLines.length, text } : text;
-  scanLines.push(payload);
+
+  const t = typeof text === "string" ? text : safeString(text?.text, "");
+  if (!t) return next;
+
+  scanLines.push({ index: scanLines.length, text: t });
   next.userMessages.scan_lines = scanLines;
   return next;
 }
