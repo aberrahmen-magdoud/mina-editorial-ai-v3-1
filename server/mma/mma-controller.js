@@ -1082,6 +1082,8 @@ export async function handleMmaCreate({ mode, body }) {
     prompts: body?.prompts || {},
   });
 
+  vars.mg_pass_id = passId;
+
   await writeGeneration({ supabase, generationId, parentId, passId, vars, mode });
 
   runProductionPipeline({ supabase, generationId, vars, mode, preferences }).catch((err) => {
