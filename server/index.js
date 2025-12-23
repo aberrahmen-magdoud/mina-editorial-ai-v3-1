@@ -1,10 +1,10 @@
 // mina-editorial-ai/server/index.js
 // MMA-compatible R2 presign gateway (PUT only + permanent public URL)
 //
-// - Returns: { key, putUrl, publicUrl }  ✅ no expiring GET URLs
-// - Requires R2_PUBLIC_BASE_URL          ✅ permanent URLs only
-// - Sets CacheControl + ContentDisposition on uploaded objects
-// - Validates kind/customerId/filename/contentType to keep keys safe
+// - Returns: { key, putUrl, publicUrl } ✅ permanent publicUrl, no expiring GET URLs
+// - Requires R2_PUBLIC_BASE_URL         ✅ permanent URLs only
+// - Validates + normalizes kind/contentType to keep keys safe + consistent
+// - Normalizes Mina frontend "kind" variants (inspo/inspiration/styleHero/style_hero/etc)
 
 import express from "express";
 import cors from "cors";
@@ -32,17 +32,73 @@ const DEFAULT_CONTENT_DISPOSITION =
 // - non-prod: allow all (more convenient)
 const ALLOW_ALL_ORIGINS_IF_EMPTY_IN_DEV = true;
 
-const ALLOWED_KINDS = new Set([
+/**
+ * ✅ CANONICAL kinds (what we store to R2 folders)
+ * Recommended for frontend:
+ * - product
+ * - logo
+ * - inspiration
+ * - style
+ * - style_hero
+ * - start
+ * - end
+ * - generation
+ * - mma
+ * - uploads
+ */
+const CANONICAL_KINDS = new Set([
   "product",
   "logo",
-  "inspo",
-  "inspiration", // ✅ added
+  "inspiration",
   "style",
-  "style_hero",  // ✅ optional but common
+  "style_hero",
+  "start",
+  "end",
   "generation",
   "mma",
   "uploads",
 ]);
+
+/**
+ * ✅ Aliases we accept from older frontend code / UI labels.
+ * Everything maps to CANONICAL_KINDS.
+ */
+const KIND_ALIASES = {
+  // inspo/inspiration
+  inspo: "inspiration",
+  inspiration: "inspiration",
+  inspirations: "inspiration",
+  insp: "inspiration",
+  style_ref: "inspiration",
+  style_refs: "inspiration",
+
+  // style hero
+  stylehero: "style_hero",
+  style_hero: "style_hero",
+  "style-hero": "style_hero",
+
+  // product/logo (common variations)
+  product_image: "product",
+  productimage: "product",
+  logo_image: "logo",
+  logoimage: "logo",
+
+  // Kling
+  start: "start",
+  start_image: "start",
+  startimage: "start",
+  "start-image": "start",
+  end: "end",
+  end_image: "end",
+  endimage: "end",
+  "end-image": "end",
+
+  // generic buckets
+  generation: "generation",
+  mma: "mma",
+  upload: "uploads",
+  uploads: "uploads",
+};
 
 const ALLOWED_CONTENT_TYPES = new Set([
   "image/png",
@@ -104,7 +160,6 @@ function assertConfigured() {
   mustEnv("R2_ACCESS_KEY_ID", R2_ACCESS_KEY_ID);
   mustEnv("R2_SECRET_ACCESS_KEY", R2_SECRET_ACCESS_KEY);
   mustEnv("R2_BUCKET", R2_BUCKET);
-  // Permanent URLs require a public base URL (custom domain or r2.dev)
   mustEnv("R2_PUBLIC_BASE_URL", R2_PUBLIC_BASE_URL);
 }
 
@@ -123,6 +178,27 @@ const S3 = new S3Client({
 });
 
 // ============================================================================
+// Normalization helpers
+// ============================================================================
+function normalizeKind(kindRaw) {
+  const raw = String(kindRaw || "").trim();
+  if (!raw) return "";
+
+  // normalize: lower, spaces->underscore, strip weird chars a bit
+  const k = raw
+    .toLowerCase()
+    .replace(/\s+/g, "_")
+    .replace(/[^a-z0-9_-]/g, "_");
+
+  const mapped = KIND_ALIASES[k] || k;
+  return CANONICAL_KINDS.has(mapped) ? mapped : "";
+}
+
+function normalizeContentType(ctRaw) {
+  return String(ctRaw || "").trim().toLowerCase();
+}
+
+// ============================================================================
 // Key helpers
 // ============================================================================
 function safePart(v, fallback = "anon") {
@@ -135,7 +211,7 @@ function safeFolder(v, fallback = "uploads") {
   const s = String(v || "").trim().toLowerCase();
   if (!s) return fallback;
 
-  // ✅ FIXED regex: collapse repeated slashes properly
+  // collapse repeated slashes properly
   const cleaned = s
     .replace(/[^a-z0-9/_-]/g, "_")
     .replace(/\/+/g, "/")
@@ -144,7 +220,6 @@ function safeFolder(v, fallback = "uploads") {
 
   if (!cleaned) return fallback;
   if (cleaned.includes("..")) return fallback; // prevent path tricks
-
   return cleaned.slice(0, 80);
 }
 
@@ -170,7 +245,6 @@ function makeKey({ kind, contentType, customerId, filename } = {}) {
   const id = crypto.randomUUID();
   const ext = extFromContentType(contentType);
 
-  // Example: mma/pass_shopify_123/2025/12/22/<uuid>-upload.png
   return `${folder}/${cid}/${yyyy}/${mm}/${dd}/${id}-${fileBase}${ext}`;
 }
 
@@ -193,27 +267,23 @@ app.get("/api/health", (_req, res) => {
 
 /**
  * POST /api/r2/presign
- * body: {
- *   kind: "mma"|"generation"|...,
- *   contentType: "image/png"|"video/mp4"|...,
- *   customerId?: "pass:shopify:..." | "anon" | etc,
- *   filename?: "source.png"
- * }
- * returns: { key, putUrl, publicUrl }
+ * body: { kind, contentType, customerId?, filename? }
+ * returns: { key, putUrl, publicUrl, kind }
  */
 app.post("/api/r2/presign", async (req, res) => {
   try {
     assertConfigured();
 
     const { kind, contentType, customerId, filename } = req.body || {};
-    const k = String(kind || "").trim().toLowerCase();
-    const ct = String(contentType || "").trim().toLowerCase();
+    const k = normalizeKind(kind);
+    const ct = normalizeContentType(contentType);
 
-    if (!k) return res.status(400).json({ error: "kind is required" });
-    if (!ALLOWED_KINDS.has(k)) {
+    if (!k) {
       return res.status(400).json({
         error: "kind not allowed",
-        allowed: Array.from(ALLOWED_KINDS),
+        message: "Use a valid kind or one of the supported aliases.",
+        canonical: Array.from(CANONICAL_KINDS),
+        aliases: Object.keys(KIND_ALIASES),
       });
     }
 
@@ -226,7 +296,7 @@ app.post("/api/r2/presign", async (req, res) => {
     }
 
     const key = makeKey({
-      kind: k,
+      kind: k, // ✅ normalized canonical kind
       contentType: ct,
       customerId: customerId || "anon",
       filename: filename || "upload",
@@ -253,7 +323,8 @@ app.post("/api/r2/presign", async (req, res) => {
       });
     }
 
-    return res.json({ key, putUrl, publicUrl });
+    // ✅ return normalized kind too (frontend can store/display it if it wants)
+    return res.json({ key, putUrl, publicUrl, kind: k });
   } catch (err) {
     console.error("[/api/r2/presign] error:", err);
     return res.status(500).json({
