@@ -3,6 +3,7 @@ import express from "express";
 import OpenAI from "openai";
 import Replicate from "replicate";
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+
 import { megaEnsureCustomer } from "../../mega-db.js";
 import { getSupabaseAdmin } from "../../supabase.js";
 
@@ -20,18 +21,82 @@ import { addSseClient, sendDone, sendScanLine, sendStatus } from "./mma-sse.js";
 import { getMmaConfig } from "./mma-config.js";
 
 // ============================================================================
-// MMA PIPELINES
-// - STILL create + STILL tweak (Seedream)
-// - VIDEO animate + VIDEO tweak (Kling)
-// - All GPT calls are VISION-capable and store full audit into mega_generations mma_step
-// - User-facing lines are pushed into mg_mma_vars.userMessages.scan_lines and streamed via SSE
-// - Motion prompts support START + optional END frame for GPT (suggestion/reader/feedback).
-// - Kling end frame is optional and guarded by env MMA_KLING_ENABLE_END_IMAGE
+// USER-FACING TEXT (EDIT THESE)
+// - The ONLY place you should tweak wording.
+// - Keep them friendly and NOT technical (no “scanning”, “prompting”, “kling”, etc).
 // ============================================================================
+const MMA_UI = {
+  // Map internal pipeline statuses -> what the frontend sees in SSE status
+  statusMap: {
+    queued: "working",
+    scanning: "working",
+    prompting: "working",
+    generating: "working",
+    postscan: "working",
+    suggested: "ready",
+    done: "done",
+    error: "error",
+  },
 
-// ---------------------------
+  // “quick lines” we can emit immediately (no GPT needed)
+  quickLines: {
+    still_create_start: [
+      "One sec—getting everything ready ✨",
+      "Alright—setting things up for you 💫",
+      "Love it. Let me prep your inputs ✨",
+    ],
+    still_tweak_start: [
+      "Got it—let’s refine that ✨",
+      "Okay—making it even better 💫",
+      "Let’s polish this up ✅",
+    ],
+    video_animate_start: [
+      "Nice—let’s bring it to life 🎬✨",
+      "Okay—animating this for you 🎥",
+      "Let’s make it move ✨",
+    ],
+    video_tweak_start: [
+      "Got it—updating the motion 🎬✨",
+      "Alright—tweaking the animation 💫",
+      "Let’s refine the movement ✅",
+    ],
+    saved_image: ["Saved ✅", "All set ✅", "Done ✅"],
+    saved_video: ["Saved ✅", "Your clip is ready ✅", "Done ✅"],
+  },
+
+  // If GPT returns an empty userMessage, use these fallbacks (still friendly)
+  fallbacks: {
+    scanned: ["Got it ✅", "Noted ✅", "Perfect—got it ✅"],
+    thinking: ["Working on it ✨", "Putting it together ✨", "Almost there 💫"],
+    final: ["All set ✅", "Here you go ✅", "Done ✅"],
+  },
+
+  // Hard rule: userMessages must NOT reveal internals
+  // (we inject this into every system prompt that outputs userMessage)
+  userMessageRules: [
+    "USER MESSAGE RULES (VERY IMPORTANT):",
+    "- userMessage must be short, friendly, human.",
+    "- Do NOT mention internal steps or tools (no 'scanning', 'prompting', 'model', 'AI', 'Kling', 'Seedream', 'Replicate', 'OpenAI', 'Supabase', 'DB', 'pipeline').",
+    "- Do NOT mention errors like CORS/browser/network.",
+    "- Do NOT use robotic labels. No status words.",
+    "- Max 140 characters.",
+  ].join("\n"),
+};
+
+function toUserStatus(internalStatus) {
+  const s = String(internalStatus || "queued");
+  return MMA_UI.statusMap[s] || "working";
+}
+
+function pick(arr, fallback = "") {
+  const a = Array.isArray(arr) ? arr.filter(Boolean) : [];
+  if (!a.length) return fallback;
+  return a[Math.floor(Math.random() * a.length)];
+}
+
+// ============================================================================
 // Clients (cached singletons)
-// ---------------------------
+// ============================================================================
 let _openai = null;
 function getOpenAI() {
   if (_openai) return _openai;
@@ -48,9 +113,9 @@ function getReplicate() {
   return _replicate;
 }
 
-// ---------------------------
-// Tiny helpers
-// ---------------------------
+// ============================================================================
+// Small helpers
+// ============================================================================
 function safeStr(v, fallback = "") {
   if (v === null || v === undefined) return fallback;
   const s = typeof v === "string" ? v : String(v);
@@ -80,9 +145,6 @@ function parseJsonMaybe(v) {
   return null;
 }
 
-// ---------------------------
-// UserMessage lines (SSE)
-// ---------------------------
 function pushUserMessageLine(vars, text) {
   const t = safeStr(text, "");
   if (!t) return vars;
@@ -101,19 +163,28 @@ function lastScanLine(vars, fallbackText = "") {
   const lines = vars?.userMessages?.scan_lines;
   const last = Array.isArray(lines) ? lines[lines.length - 1] : null;
   if (last) return last;
-  const idx = Array.isArray(lines) ? lines.length : 0;
-  return { text: safeStr(fallbackText, ""), index: idx };
+  return { text: fallbackText, index: Array.isArray(lines) ? lines.length : 0 };
 }
 
-function truthyEnv(name, fallback = false) {
-  const v = process.env[name];
-  if (v === undefined) return fallback;
-  return /^(1|true|yes|on)$/i.test(String(v).trim());
+function emitStatus(generationId, internalStatus) {
+  // ✅ never leak internal status to UI
+  sendStatus(generationId, toUserStatus(internalStatus));
+}
+
+function emitLine(generationId, vars, fallbackText = "") {
+  const line = lastScanLine(vars, fallbackText);
+  sendScanLine(generationId, line);
+}
+
+function setCtxAudit(vars, ctx) {
+  const next = { ...(vars || {}) };
+  next.ctx = { ...(next.ctx || {}), mma_ctx_used: ctx };
+  return next;
 }
 
 // ============================================================================
 // ctx config (editable in mega_admin)
-// table: mega_admin where mg_record_type='app_config' mg_key='mma_ctx'
+// table: mega_admin row: mg_record_type='app_config', mg_key='mma_ctx', mg_value json
 // ============================================================================
 async function getMmaCtxConfig(supabase) {
   const defaults = {
@@ -122,9 +193,8 @@ async function getMmaCtxConfig(supabase) {
       "You will be given ONE image. Understand it.",
       'Output STRICT JSON only (no markdown): {"crt":string,"userMessage":string}',
       "crt: short factual description of the image in ONE sentence (max 220 chars).",
-      "Also classify implicitly: if it's product/logo/inspiration, mention that in crt.",
-      "userMessage: short friendly human line while user waits. Max 140 chars.",
-      "Never mention technical errors like CORS.",
+      "If it's product/logo/inspiration, hint that in crt.",
+      MMA_UI.userMessageRules,
     ].join("\n"),
 
     like_history: [
@@ -133,59 +203,58 @@ async function getMmaCtxConfig(supabase) {
       'Output STRICT JSON only: {"style_history_csv":string}',
       "style_history_csv: comma-separated keywords (5 to 12 items). No hashtags. No sentences.",
       'Example: "editorial still life, luxury, minimal, soft shadows, no lens flare"',
+      // no userMessage here
     ].join("\n"),
 
     reader: [
       "You are Mina Mind — prompt builder for Seedream (still image only).",
       "You will receive product_crt/logo_crt/inspiration_crt + user brief + style + style_history.",
-      'Output STRICT JSON only: {"clean_prompt":string,"userMessage":string}',
+      'Output STRICT JSON only (no markdown): {"clean_prompt":string,"userMessage":string}',
       "clean_prompt must be Seedream-ready, photoreal editorial, concise but detailed.",
       "Respect logo integration if logo_crt exists, and use inspirations if provided.",
-      "userMessage: one friendly line to show while generating (max 140 chars).",
+      MMA_UI.userMessageRules,
     ].join("\n"),
 
     output_scan: [
       "You are Mina GPTscanner (output scan).",
       "You will be given the GENERATED image.",
-      'Output STRICT JSON only: {"still_crt":string,"userMessage":string}',
+      'Output STRICT JSON only (no markdown): {"still_crt":string,"userMessage":string}',
       "still_crt: short description of what the generated image contains (1 sentence, max 220 chars).",
-      "userMessage: short friendly line (max 140 chars).",
+      MMA_UI.userMessageRules,
     ].join("\n"),
 
     feedback: [
       "You are Mina Feedback Fixer for Seedream still images.",
       "You will receive: generated image + still_crt + user feedback text + previous prompt.",
-      'Output STRICT JSON only: {"clean_prompt":string}',
+      'Output STRICT JSON only (no markdown): {"clean_prompt":string}',
       "clean_prompt must keep what's good, fix what's bad, and apply feedback precisely.",
     ].join("\n"),
 
     // ---------------------------
     // MOTION (video) ctx blocks
+    // NOTE: these can receive BOTH start and end frames (if end provided)
     // ---------------------------
     motion_suggestion: [
       "You are Mina Motion Suggestion.",
-      "You will receive: a START still image + an OPTIONAL END still image, plus still_crt + motion_user_brief + selected_movement_style.",
-      'Output STRICT JSON only: {"sugg_prompt":string,"userMessage":string}',
-      "sugg_prompt: a simple, short Kling-ready motion prompt. Be clear about subject motion and camera movement.",
-      "If an end_image_url is provided, the motion should plausibly evolve from start toward the end frame.",
-      "userMessage: friendly short line while user waits (max 140 chars).",
+      "You will receive: start still image (and maybe end frame) + still_crt + motion_user_brief + selected_movement_style.",
+      'Output STRICT JSON only (no markdown): {"sugg_prompt":string,"userMessage":string}',
+      "sugg_prompt: a simple, short Kling-ready motion prompt. Be clear about motion + camera.",
+      MMA_UI.userMessageRules,
     ].join("\n"),
 
     motion_reader2: [
       "You are Mina Motion Reader — prompt builder for Kling (image-to-video).",
-      "You will receive: a START still image + an OPTIONAL END still image, plus still_crt + motion_user_brief + selected_movement_style.",
-      'Output STRICT JSON only: {"motion_prompt":string,"userMessage":string}',
-      "motion_prompt: Kling-ready prompt. Describe motion, camera movement, atmosphere, pace. Concise but detailed.",
-      "If an end_image_url is provided, align the motion to move toward that end frame.",
-      "userMessage: friendly short line while user waits (max 140 chars).",
+      "You will receive: start still image (and maybe end frame) + still_crt + motion_user_brief + selected_movement_style.",
+      'Output STRICT JSON only (no markdown): {"motion_prompt":string,"userMessage":string}',
+      "motion_prompt: Kling-ready. Describe motion, camera movement, atmosphere, pace. Concise but detailed.",
+      MMA_UI.userMessageRules,
     ].join("\n"),
 
     motion_feedback2: [
       "You are Mina Motion Feedback Fixer for Kling (image-to-video).",
-      "You will receive: start image + optional end image + still_crt + motion_user_brief + selected_movement_style + feedback_motion + previous motion prompt.",
-      'Output STRICT JSON only: {"motion_prompt":string}',
+      "You will receive: base motion input + feedback_motion + previous motion prompt.",
+      'Output STRICT JSON only (no markdown): {"motion_prompt":string}',
       "motion_prompt must keep what's good, fix what's bad, and apply feedback precisely.",
-      "If an end_image_url is provided, keep motion aligned toward that end frame.",
     ].join("\n"),
   };
 
@@ -207,14 +276,14 @@ async function getMmaCtxConfig(supabase) {
 }
 
 // ============================================================================
-// OpenAI vision JSON helper (Responses API preferred; fallback to chat.completions)
+// OpenAI vision JSON helper (Responses API preferred, Chat Completions fallback)
 // ============================================================================
 function buildResponsesUserContent({ text, imageUrls }) {
   const parts = [];
   const t = safeStr(text, "");
   if (t) parts.push({ type: "input_text", text: t });
 
-  for (const u of Array.isArray(imageUrls) ? imageUrls : []) {
+  for (const u of safeArray(imageUrls)) {
     const url = asHttpUrl(u);
     if (!url) continue;
     parts.push({ type: "input_image", image_url: url });
@@ -224,17 +293,13 @@ function buildResponsesUserContent({ text, imageUrls }) {
 
 function extractResponsesText(resp) {
   if (resp && typeof resp.output_text === "string") return resp.output_text;
-
   const out = resp?.output;
   if (!Array.isArray(out)) return "";
-
   let text = "";
   for (const item of out) {
     if (item?.type === "message" && Array.isArray(item?.content)) {
       for (const c of item.content) {
-        if (c?.type === "output_text" && typeof c?.text === "string") {
-          text += c.text;
-        }
+        if (c?.type === "output_text" && typeof c?.text === "string") text += c.text;
       }
     }
   }
@@ -244,17 +309,14 @@ function extractResponsesText(resp) {
 async function openaiJsonVision({ model, system, userText, imageUrls }) {
   const openai = getOpenAI();
 
-  const input = [
-    { role: "system", content: system },
-    {
-      role: "user",
-      content: buildResponsesUserContent({ text: userText, imageUrls }),
-    },
-  ];
-
-  // Prefer Responses API
+  // Try Responses API
   try {
     if (openai.responses?.create) {
+      const input = [
+        { role: "system", content: system },
+        { role: "user", content: buildResponsesUserContent({ text: userText, imageUrls }) },
+      ];
+
       const resp = await openai.responses.create({
         model,
         input,
@@ -264,17 +326,13 @@ async function openaiJsonVision({ model, system, userText, imageUrls }) {
       const raw = extractResponsesText(resp);
       const parsed = parseJsonMaybe(raw);
 
-      return {
-        request: { model, input, text: { format: { type: "json_object" } } },
-        raw,
-        parsed,
-      };
+      return { request: { model, input, text: { format: { type: "json_object" } } }, raw, parsed };
     }
   } catch {
-    // fall through
+    // fallback below
   }
 
-  // Fallback: Chat Completions
+  // Chat Completions fallback
   const messages = [
     { role: "system", content: system },
     {
@@ -298,19 +356,14 @@ async function openaiJsonVision({ model, system, userText, imageUrls }) {
   const raw = resp?.choices?.[0]?.message?.content || "";
   const parsed = parseJsonMaybe(raw);
 
-  return {
-    request: { model, messages, response_format: { type: "json_object" } },
-    raw,
-    parsed,
-  };
+  return { request: { model, messages, response_format: { type: "json_object" } }, raw, parsed };
 }
 
 // ============================================================================
-// GPT steps (scanner/reader/feedback + motion suggest/reader2/feedback2)
+// GPT steps
 // ============================================================================
 async function gptScanImage({ cfg, ctx, kind, imageUrl }) {
   const userText = [`KIND: ${kind}`, "Return JSON only."].join("\n");
-
   const out = await openaiJsonVision({
     model: cfg.gptModel,
     system: ctx.scanner,
@@ -331,10 +384,7 @@ async function gptMakeStyleHistory({ cfg, ctx, likeItems }) {
     "Return JSON only.",
   ].join("\n");
 
-  const imageUrls = likeItems
-    .map((x) => asHttpUrl(x?.imageUrl))
-    .filter(Boolean)
-    .slice(0, 8);
+  const imageUrls = likeItems.map((x) => asHttpUrl(x?.imageUrl)).filter(Boolean).slice(0, 8);
 
   const out = await openaiJsonVision({
     model: cfg.gptModel,
@@ -352,7 +402,7 @@ async function gptReader({ cfg, ctx, input, imageUrls }) {
     model: cfg.gptModel,
     system: ctx.reader,
     userText: JSON.stringify(input, null, 2).slice(0, 14000),
-    imageUrls: (Array.isArray(imageUrls) ? imageUrls : []).slice(0, 10),
+    imageUrls: safeArray(imageUrls).slice(0, 10),
   });
 
   const clean_prompt = safeStr(out?.parsed?.clean_prompt, "");
@@ -365,7 +415,7 @@ async function gptScanOutputStill({ cfg, ctx, imageUrl }) {
   const out = await openaiJsonVision({
     model: cfg.gptModel,
     system: ctx.output_scan,
-    userText: "Scan this image. Return JSON only.",
+    userText: "Return JSON only.",
     imageUrls: [imageUrl],
   });
 
@@ -390,88 +440,83 @@ async function gptFeedbackFixer({ cfg, ctx, parentImageUrl, stillCrt, feedbackTe
     imageUrls: [parentImageUrl],
   });
 
-  const clean_prompt =
-    safeStr(out?.parsed?.clean_prompt, "") ||
-    safeStr(out?.parsed?.prompt, "") ||
-    "";
-
+  const clean_prompt = safeStr(out?.parsed?.clean_prompt, "") || safeStr(out?.parsed?.prompt, "") || "";
   return { clean_prompt, raw: out.raw, request: out.request, parsed_ok: !!out.parsed };
 }
 
-// ---------------------------
-// MOTION GPT steps (START + optional END frame)
-// ---------------------------
+// ---- motion GPT steps (support optional end frame) ----
 async function gptMotionSuggestion({ cfg, ctx, startImageUrl, endImageUrl, stillCrt, motionBrief, movementStyle }) {
   const input = {
-    start_image_url: safeStr(startImageUrl, ""),
-    end_image_url: safeStr(endImageUrl, ""), // ✅ optional
+    start_image_url: startImageUrl,
+    end_image_url: asHttpUrl(endImageUrl) || null,
     still_crt: safeStr(stillCrt, ""),
     motion_user_brief: safeStr(motionBrief, ""),
     selected_movement_style: safeStr(movementStyle, ""),
   };
 
-  const imageUrls = [startImageUrl, endImageUrl].map(asHttpUrl).filter(Boolean);
+  const images = [startImageUrl, endImageUrl].map(asHttpUrl).filter(Boolean);
 
   const out = await openaiJsonVision({
     model: cfg.gptModel,
     system: ctx.motion_suggestion,
     userText: JSON.stringify(input, null, 2).slice(0, 14000),
-    imageUrls,
+    imageUrls: images,
   });
 
   const sugg_prompt = safeStr(out?.parsed?.sugg_prompt, "");
   const userMessage = safeStr(out?.parsed?.userMessage, "");
-
   return { sugg_prompt, userMessage, raw: out.raw, request: out.request, parsed_ok: !!out.parsed };
 }
 
 async function gptMotionReader2({ cfg, ctx, startImageUrl, endImageUrl, stillCrt, motionBrief, movementStyle }) {
   const input = {
-    start_image_url: safeStr(startImageUrl, ""),
-    end_image_url: safeStr(endImageUrl, ""), // ✅ optional
+    start_image_url: startImageUrl,
+    end_image_url: asHttpUrl(endImageUrl) || null,
     still_crt: safeStr(stillCrt, ""),
     motion_user_brief: safeStr(motionBrief, ""),
     selected_movement_style: safeStr(movementStyle, ""),
   };
 
-  const imageUrls = [startImageUrl, endImageUrl].map(asHttpUrl).filter(Boolean);
+  const images = [startImageUrl, endImageUrl].map(asHttpUrl).filter(Boolean);
 
   const out = await openaiJsonVision({
     model: cfg.gptModel,
     system: ctx.motion_reader2,
     userText: JSON.stringify(input, null, 2).slice(0, 14000),
-    imageUrls,
+    imageUrls: images,
   });
 
   const motion_prompt = safeStr(out?.parsed?.motion_prompt, "");
   const userMessage = safeStr(out?.parsed?.userMessage, "");
-
   return { motion_prompt, userMessage, raw: out.raw, request: out.request, parsed_ok: !!out.parsed };
 }
 
-async function gptMotionFeedback2({ cfg, ctx, startImageUrl, endImageUrl, baseInput, feedbackMotion, previousMotionPrompt }) {
+async function gptMotionFeedback2({
+  cfg,
+  ctx,
+  startImageUrl,
+  endImageUrl,
+  baseInput,
+  feedbackMotion,
+  previousMotionPrompt,
+}) {
   const input = {
     ...baseInput,
-    start_image_url: safeStr(startImageUrl, ""),
-    end_image_url: safeStr(endImageUrl, ""), // ✅ optional
+    end_image_url: asHttpUrl(endImageUrl) || baseInput?.end_image_url || null,
     feedback_motion: safeStr(feedbackMotion, ""),
     previous_motion_prompt: safeStr(previousMotionPrompt, ""),
   };
 
-  const imageUrls = [startImageUrl, endImageUrl].map(asHttpUrl).filter(Boolean);
+  const images = [startImageUrl, endImageUrl].map(asHttpUrl).filter(Boolean);
 
   const out = await openaiJsonVision({
     model: cfg.gptModel,
     system: ctx.motion_feedback2,
     userText: JSON.stringify(input, null, 2).slice(0, 14000),
-    imageUrls,
+    imageUrls: images,
   });
 
-  const motion_prompt =
-    safeStr(out?.parsed?.motion_prompt, "") ||
-    safeStr(out?.parsed?.prompt, "") ||
-    "";
-
+  const motion_prompt = safeStr(out?.parsed?.motion_prompt, "") || safeStr(out?.parsed?.prompt, "") || "";
   return { motion_prompt, raw: out.raw, request: out.request, parsed_ok: !!out.parsed };
 }
 
@@ -491,15 +536,11 @@ function pickFirstUrl(output) {
 
 function buildSeedreamImageInputs(vars) {
   const assets = vars?.assets || {};
-
   const product = asHttpUrl(assets.product_image_url || assets.productImageUrl);
   const logo = asHttpUrl(assets.logo_image_url || assets.logoImageUrl);
 
   const styleHero = asHttpUrl(
-    assets.style_hero_image_url ||
-      assets.styleHeroImageUrl ||
-      assets.style_hero_url ||
-      assets.styleHeroUrl
+    assets.style_hero_image_url || assets.styleHeroImageUrl || assets.style_hero_url || assets.styleHeroUrl
   );
 
   const inspiration = safeArray(
@@ -512,6 +553,7 @@ function buildSeedreamImageInputs(vars) {
     .filter(Boolean)
     .slice(0, 4);
 
+  // spec order: product, logo, inspirations, style hero
   return []
     .concat(product ? [product] : [])
     .concat(logo ? [logo] : [])
@@ -526,7 +568,7 @@ async function runSeedream({ prompt, aspectRatio, imageInputs = [], size, enhanc
   const cfg = getMmaConfig();
 
   const sizeValue = size || cfg?.seadream?.size || process.env.MMA_SEADREAM_SIZE || "2K";
-  const defaultAspect = process.env.MMA_SEADREAM_ASPECT_RATIO || cfg?.seadream?.aspectRatio || "match_input_image";
+  const defaultAspect = cfg?.seadream?.aspectRatio || process.env.MMA_SEADREAM_ASPECT_RATIO || "match_input_image";
 
   const version =
     process.env.MMA_SEADREAM_VERSION ||
@@ -542,9 +584,7 @@ async function runSeedream({ prompt, aspectRatio, imageInputs = [], size, enhanc
 
   const finalPrompt = neg ? `${prompt}\n\nAvoid: ${neg}` : prompt;
 
-  const cleanedInputs = Array.isArray(imageInputs)
-    ? imageInputs.map(asHttpUrl).filter(Boolean).slice(0, 10)
-    : [];
+  const cleanedInputs = safeArray(imageInputs).map(asHttpUrl).filter(Boolean).slice(0, 10);
 
   const enhance_prompt =
     enhancePrompt !== undefined
@@ -565,6 +605,7 @@ async function runSeedream({ prompt, aspectRatio, imageInputs = [], size, enhanc
         ...(cleanedInputs.length ? { image_input: cleanedInputs } : {}),
       };
 
+  // enforce required fields
   if (!input.aspect_ratio) input.aspect_ratio = aspectRatio || defaultAspect;
   if (!input.size) input.size = sizeValue;
   if (input.enhance_prompt === undefined) input.enhance_prompt = enhance_prompt;
@@ -578,47 +619,35 @@ async function runSeedream({ prompt, aspectRatio, imageInputs = [], size, enhanc
   return {
     input,
     out,
-    timing: {
-      started_at: new Date(t0).toISOString(),
-      ended_at: nowIso(),
-      duration_ms: Date.now() - t0,
-    },
+    timing: { started_at: new Date(t0).toISOString(), ended_at: nowIso(), duration_ms: Date.now() - t0 },
   };
 }
 
-// ---------------------------
-// Kling helpers (video)
-// ---------------------------
-const KLING_ENABLE_END_IMAGE = truthyEnv("MMA_KLING_ENABLE_END_IMAGE", false);
-
-function pickKlingStartImage(vars) {
+// ---- Kling helpers ----
+function pickKlingStartImage(vars, parent) {
   const assets = vars?.assets || {};
   const inputs = vars?.inputs || {};
 
   return (
     asHttpUrl(inputs.start_image_url || inputs.startImageUrl) ||
     asHttpUrl(inputs.parent_output_url || inputs.parentOutputUrl) ||
+    asHttpUrl(parent?.mg_output_url) ||
     asHttpUrl(assets.start_image_url || assets.startImageUrl) ||
     asHttpUrl(assets.product_image_url || assets.productImageUrl) ||
     ""
   );
 }
 
-function pickKlingEndImage(vars) {
+function pickKlingEndImage(vars, parent) {
   const assets = vars?.assets || {};
   const inputs = vars?.inputs || {};
 
+  // allow explicit end image (optional)
   return (
     asHttpUrl(inputs.end_image_url || inputs.endImageUrl) ||
     asHttpUrl(assets.end_image_url || assets.endImageUrl) ||
     ""
   );
-}
-
-function pickKlingImages(vars) {
-  const start = pickKlingStartImage(vars);
-  const end = pickKlingEndImage(vars);
-  return { start, end };
 }
 
 async function runKling({ prompt, startImage, endImage, duration, mode, negativePrompt, input: forcedInput }) {
@@ -641,8 +670,13 @@ async function runKling({ prompt, startImage, endImage, duration, mode, negative
 
   const finalNeg = negativePrompt !== undefined ? negativePrompt : envNeg;
 
-  const endOk = KLING_ENABLE_END_IMAGE && !!asHttpUrl(endImage);
-  const finalMode = endOk ? "pro" : (mode || cfg?.kling?.mode || process.env.MMA_KLING_MODE || "standard");
+  const hasEnd = !!asHttpUrl(endImage);
+  const finalMode =
+    safeStr(mode, "") ||
+    (hasEnd ? "pro" : "") ||
+    cfg?.kling?.mode ||
+    process.env.MMA_KLING_MODE ||
+    "standard";
 
   const input = forcedInput
     ? { ...forcedInput }
@@ -651,22 +685,15 @@ async function runKling({ prompt, startImage, endImage, duration, mode, negative
         prompt,
         duration: defaultDuration,
         start_image: startImage,
-        ...(endOk ? { end_image: endImage } : {}), // ✅ guarded end frame
+        ...(hasEnd ? { end_image: asHttpUrl(endImage) } : {}),
       };
 
-  // enforce required fields
   if (finalNeg && !input.negative_prompt) input.negative_prompt = finalNeg;
   if (!input.mode) input.mode = finalMode;
   if (!input.prompt) input.prompt = prompt;
   input.duration = Number(input.duration ?? defaultDuration) || defaultDuration;
   if (!input.start_image) input.start_image = startImage;
-
-  // If caller forced input but end is allowed + provided, we still can add it safely (unless they already set it)
-  if (endOk && !input.end_image) input.end_image = endImage;
-  if (!endOk && input.end_image) {
-    // Safety: remove end_image if feature is off (avoid schema surprises)
-    delete input.end_image;
-  }
+  if (hasEnd && !input.end_image) input.end_image = asHttpUrl(endImage);
 
   const t0 = Date.now();
   const out = await replicate.run(version, { input });
@@ -674,12 +701,7 @@ async function runKling({ prompt, startImage, endImage, duration, mode, negative
   return {
     input,
     out,
-    end_used: !!input.end_image,
-    timing: {
-      started_at: new Date(t0).toISOString(),
-      ended_at: nowIso(),
-      duration_ms: Date.now() - t0,
-    },
+    timing: { started_at: new Date(t0).toISOString(), ended_at: nowIso(), duration_ms: Date.now() - t0 },
   };
 }
 
@@ -688,9 +710,7 @@ async function runKling({ prompt, startImage, endImage, duration, mode, negative
 // ============================================================================
 function getR2() {
   const accountId = process.env.R2_ACCOUNT_ID || "";
-  const endpoint =
-    process.env.R2_ENDPOINT ||
-    (accountId ? `https://${accountId}.r2.cloudflarestorage.com` : "");
+  const endpoint = process.env.R2_ENDPOINT || (accountId ? `https://${accountId}.r2.cloudflarestorage.com` : "");
 
   const accessKeyId = process.env.R2_ACCESS_KEY_ID || "";
   const secretAccessKey = process.env.R2_SECRET_ACCESS_KEY || "";
@@ -737,11 +757,7 @@ async function storeRemoteToR2Public(url, keyPrefix) {
 
   const buf = Buffer.from(await res.arrayBuffer());
   const contentType = res.headers.get("content-type") || "application/octet-stream";
-
-  const ext =
-    guessExt(url, contentType.includes("video") ? ".mp4" : ".png") ||
-    (contentType.includes("video") ? ".mp4" : ".png");
-
+  const ext = guessExt(url, contentType.includes("video") ? ".mp4" : ".png");
   const objKey = `${keyPrefix}${ext}`;
 
   await client.send(
@@ -841,10 +857,21 @@ async function fetchParentGenerationRow(supabase, parentGenerationId) {
   return data || null;
 }
 
+// Likes are stored in mega_generations as mg_record_type='feedback' in your setup.
+// We try mg_payload first; then mg_meta fallback.
+function extractFeedbackPayload(row) {
+  const p = parseJsonMaybe(row?.mg_payload);
+  if (p) return p;
+  const m = parseJsonMaybe(row?.mg_meta);
+  if (!m) return null;
+  if (m.payload && typeof m.payload === "object") return m.payload;
+  return m;
+}
+
 async function fetchRecentLikedItems({ supabase, passId, limit }) {
   const { data, error } = await supabase
     .from("mega_generations")
-    .select("mg_payload, mg_event_at, mg_created_at")
+    .select("mg_payload, mg_meta, mg_event_at, mg_created_at")
     .eq("mg_record_type", "feedback")
     .eq("mg_pass_id", passId)
     .order("mg_event_at", { ascending: false })
@@ -856,13 +883,13 @@ async function fetchRecentLikedItems({ supabase, passId, limit }) {
   const liked = [];
 
   for (const r of rows) {
-    const p = r?.mg_payload && typeof r.mg_payload === "object" ? r.mg_payload : parseJsonMaybe(r?.mg_payload);
-    if (!p) continue;
-    if (p.liked !== true) continue;
+    const payload = extractFeedbackPayload(r);
+    if (!payload) continue;
+    if (payload.liked !== true) continue;
 
     liked.push({
-      prompt: safeStr(p.prompt, ""),
-      imageUrl: safeStr(p.imageUrl, ""),
+      prompt: safeStr(payload.prompt, ""),
+      imageUrl: safeStr(payload.imageUrl, ""),
       createdAt: r.mg_event_at || r.mg_created_at || null,
     });
 
@@ -882,21 +909,30 @@ async function runStillCreatePipeline({ supabase, generationId, passId, vars, pr
   let working = vars;
   const ctx = await getMmaCtxConfig(supabase);
 
-  let stepNo = 1;
-
   try {
-    // 1) scanning
+    // ---- scanning ----
     await updateStatus({ supabase, generationId, status: "scanning" });
-    sendStatus(generationId, "scanning");
+    emitStatus(generationId, "scanning");
 
-    working.ctx = { ...(working.ctx || {}), mma_ctx: ctx };
+    working = setCtxAudit(working, ctx);
     working.scans = { ...(working.scans || {}) };
 
-    working = pushUserMessageLine(working, "Scanning your inputs…");
+    working = pushUserMessageLine(working, pick(MMA_UI.quickLines.still_create_start));
     await updateVars({ supabase, generationId, vars: working });
-    sendScanLine(generationId, lastScanLine(working, "Scanning your inputs…"));
+    emitLine(generationId, working);
 
-    const productUrl = asHttpUrl(working?.assets?.product_image_url || working?.assets?.productImageUrl);
+    let stepNo = 1;
+
+    const assets = working?.assets || {};
+    const productUrl = asHttpUrl(assets.product_image_url || assets.productImageUrl);
+    const logoUrl = asHttpUrl(assets.logo_image_url || assets.logoImageUrl);
+
+    const inspUrls = safeArray(assets.inspiration_image_urls || assets.inspirationImageUrls || assets.style_image_urls || assets.styleImageUrls)
+      .map(asHttpUrl)
+      .filter(Boolean)
+      .slice(0, 4);
+
+    // product
     if (productUrl) {
       const t0 = Date.now();
       const scan = await gptScanImage({ cfg, ctx, kind: "product", imageUrl: productUrl });
@@ -912,19 +948,19 @@ async function runStillCreatePipeline({ supabase, generationId, passId, vars, pr
           input: { kind: "product", imageUrl: productUrl },
           request: scan.request,
           raw: scan.raw,
-          output: scan,
+          output: { crt: scan.crt, userMessage: scan.userMessage, parsed_ok: scan.parsed_ok },
           timing: { started_at: new Date(t0).toISOString(), ended_at: nowIso(), duration_ms: Date.now() - t0 },
           error: null,
         },
       });
 
       working.scans.product_crt = scan.crt || null;
-      working = pushUserMessageLine(working, scan.userMessage || "Got your product image ✅");
+      working = pushUserMessageLine(working, scan.userMessage || pick(MMA_UI.fallbacks.scanned));
       await updateVars({ supabase, generationId, vars: working });
-      sendScanLine(generationId, lastScanLine(working, "Got your product image ✅"));
+      emitLine(generationId, working);
     }
 
-    const logoUrl = asHttpUrl(working?.assets?.logo_image_url || working?.assets?.logoImageUrl);
+    // logo
     if (logoUrl) {
       const t0 = Date.now();
       const scan = await gptScanImage({ cfg, ctx, kind: "logo", imageUrl: logoUrl });
@@ -940,32 +976,22 @@ async function runStillCreatePipeline({ supabase, generationId, passId, vars, pr
           input: { kind: "logo", imageUrl: logoUrl },
           request: scan.request,
           raw: scan.raw,
-          output: scan,
+          output: { crt: scan.crt, userMessage: scan.userMessage, parsed_ok: scan.parsed_ok },
           timing: { started_at: new Date(t0).toISOString(), ended_at: nowIso(), duration_ms: Date.now() - t0 },
           error: null,
         },
       });
 
       working.scans.logo_crt = scan.crt || null;
-      working = pushUserMessageLine(working, scan.userMessage || "Logo noted ✅");
+      working = pushUserMessageLine(working, scan.userMessage || pick(MMA_UI.fallbacks.scanned));
       await updateVars({ supabase, generationId, vars: working });
-      sendScanLine(generationId, lastScanLine(working, "Logo noted ✅"));
+      emitLine(generationId, working);
     }
 
-    const insp = safeArray(
-      working?.assets?.inspiration_image_urls ||
-        working?.assets?.inspirationImageUrls ||
-        working?.assets?.style_image_urls ||
-        working?.assets?.styleImageUrls
-    )
-      .map(asHttpUrl)
-      .filter(Boolean)
-      .slice(0, 4);
-
+    // inspirations
     working.scans.inspiration_crt = Array.isArray(working.scans.inspiration_crt) ? working.scans.inspiration_crt : [];
-
-    for (let i = 0; i < insp.length; i++) {
-      const imageUrl = insp[i];
+    for (let i = 0; i < inspUrls.length; i++) {
+      const imageUrl = inspUrls[i];
       const t0 = Date.now();
       const scan = await gptScanImage({ cfg, ctx, kind: `inspiration_${i + 1}`, imageUrl });
 
@@ -980,23 +1006,23 @@ async function runStillCreatePipeline({ supabase, generationId, passId, vars, pr
           input: { kind: `inspiration_${i + 1}`, imageUrl },
           request: scan.request,
           raw: scan.raw,
-          output: scan,
+          output: { crt: scan.crt, userMessage: scan.userMessage, parsed_ok: scan.parsed_ok },
           timing: { started_at: new Date(t0).toISOString(), ended_at: nowIso(), duration_ms: Date.now() - t0 },
           error: null,
         },
       });
 
       working.scans.inspiration_crt = [...working.scans.inspiration_crt, scan.crt || ""];
-      working = pushUserMessageLine(working, scan.userMessage || `Inspiration ${i + 1} added ✨`);
+      working = pushUserMessageLine(working, scan.userMessage || pick(MMA_UI.fallbacks.scanned));
       await updateVars({ supabase, generationId, vars: working });
-      sendScanLine(generationId, lastScanLine(working, `Inspiration ${i + 1} added ✨`));
+      emitLine(generationId, working);
     }
 
-    // 1b) Like-history -> style_history_csv (optional)
-    const visionOn = !!working?.history?.vision_intelligence;
-    const likeLimit = visionOn ? 5 : 20;
-
+    // ---- optional like history -> style keywords ----
     try {
+      const visionOn = !!working?.history?.vision_intelligence;
+      const likeLimit = visionOn ? 5 : 20;
+
       const likes = await fetchRecentLikedItems({ supabase, passId, limit: likeLimit });
       if (likes.length) {
         const t0 = Date.now();
@@ -1013,42 +1039,37 @@ async function runStillCreatePipeline({ supabase, generationId, passId, vars, pr
             input: { vision_intelligence: visionOn, limit: likeLimit, likes },
             request: style.request,
             raw: style.raw,
-            output: style,
+            output: { style_history_csv: style.style_history_csv, parsed_ok: style.parsed_ok },
             timing: { started_at: new Date(t0).toISOString(), ended_at: nowIso(), duration_ms: Date.now() - t0 },
             error: null,
           },
         });
 
         working.history = { ...(working.history || {}), style_history_csv: style.style_history_csv || null };
-        working = pushUserMessageLine(working, "Remembered your style preferences 🧠✨");
+        // no need to spam a line here; keep it subtle
         await updateVars({ supabase, generationId, vars: working });
-        sendScanLine(generationId, lastScanLine(working, "Remembered your style preferences 🧠✨"));
       }
     } catch {
       // optional
     }
 
-    // 2) prompting
+    // ---- prompting ----
     await updateStatus({ supabase, generationId, status: "prompting" });
-    sendStatus(generationId, "prompting");
+    emitStatus(generationId, "prompting");
 
     const readerInput = {
-      product_crt: safeStr(working?.scans?.product_crt || ""),
-      logo_crt: safeStr(working?.scans?.logo_crt || ""),
+      product_crt: safeStr(working?.scans?.product_crt, ""),
+      logo_crt: safeStr(working?.scans?.logo_crt, ""),
       inspiration_crt: Array.isArray(working?.scans?.inspiration_crt) ? working.scans.inspiration_crt : [],
-      userBrief: safeStr(working?.inputs?.brief || working?.inputs?.userBrief || ""),
-      style: safeStr(working?.inputs?.style || ""),
-      platform: safeStr(working?.inputs?.platform || "default"),
-      aspect_ratio: safeStr(working?.inputs?.aspect_ratio || ""),
-      style_history_csv: safeStr(working?.history?.style_history_csv || ""),
+      userBrief: safeStr(working?.inputs?.brief || working?.inputs?.userBrief, ""),
+      style: safeStr(working?.inputs?.style, ""),
+      platform: safeStr(working?.inputs?.platform || "default", "default"),
+      aspect_ratio: safeStr(working?.inputs?.aspect_ratio, ""),
+      style_history_csv: safeStr(working?.history?.style_history_csv, ""),
       preferences: preferences || {},
     };
 
-    const readerImages = []
-      .concat(productUrl ? [productUrl] : [])
-      .concat(logoUrl ? [logoUrl] : [])
-      .concat(insp)
-      .filter(Boolean);
+    const readerImages = [productUrl, logoUrl, ...inspUrls].map(asHttpUrl).filter(Boolean);
 
     const tReader = Date.now();
     const prompts = await gptReader({ cfg, ctx, input: readerInput, imageUrls: readerImages });
@@ -1064,40 +1085,38 @@ async function runStillCreatePipeline({ supabase, generationId, passId, vars, pr
         input: readerInput,
         request: prompts.request,
         raw: prompts.raw,
-        output: prompts,
+        output: { clean_prompt: prompts.clean_prompt, userMessage: prompts.userMessage, parsed_ok: prompts.parsed_ok },
         timing: { started_at: new Date(tReader).toISOString(), ended_at: nowIso(), duration_ms: Date.now() - tReader },
         error: null,
       },
     });
 
     working.prompts = { ...(working.prompts || {}), clean_prompt: prompts.clean_prompt || "" };
-    working = pushUserMessageLine(working, prompts.userMessage || "Prompt locked in. Cooking… 🔥");
+    working = pushUserMessageLine(working, prompts.userMessage || pick(MMA_UI.fallbacks.thinking));
     await updateVars({ supabase, generationId, vars: working });
-    sendScanLine(generationId, lastScanLine(working, "Prompt locked in. Cooking… 🔥"));
+    emitLine(generationId, working);
 
-    // 3) generate (Seedream)
+    // ---- generating ----
     await updateStatus({ supabase, generationId, status: "generating" });
-    sendStatus(generationId, "generating");
+    emitStatus(generationId, "generating");
 
     const usedPrompt = safeStr(working?.prompts?.clean_prompt, "");
     if (!usedPrompt) throw new Error("EMPTY_PROMPT");
 
-    const aspect_ratio =
-      working?.inputs?.aspect_ratio ||
+    const imageInputs = buildSeedreamImageInputs(working);
+    const aspectRatio =
+      safeStr(working?.inputs?.aspect_ratio, "") ||
       cfg?.seadream?.aspectRatio ||
       process.env.MMA_SEADREAM_ASPECT_RATIO ||
       "match_input_image";
 
-    const seed = await runSeedream({
+    const { input, out, timing } = await runSeedream({
       prompt: usedPrompt,
-      aspectRatio: aspect_ratio,
-      imageInputs: buildSeedreamImageInputs(working),
+      aspectRatio,
+      imageInputs,
       size: cfg?.seadream?.size,
       enhancePrompt: cfg?.seadream?.enhancePrompt,
     });
-
-    const seedUrl = pickFirstUrl(seed.out);
-    if (!seedUrl) throw new Error("SEADREAM_NO_URL");
 
     await writeStep({
       supabase,
@@ -1105,16 +1124,19 @@ async function runStillCreatePipeline({ supabase, generationId, passId, vars, pr
       passId,
       stepNo: stepNo++,
       stepType: "seedream_generate",
-      payload: { input: seed.input, output: seed.out, timing: seed.timing, error: null },
+      payload: { input, output: out, timing, error: null },
     });
 
-    const remoteUrl = await storeRemoteToR2Public(seedUrl, `mma/still/${generationId}`);
+    const url = pickFirstUrl(out);
+    if (!url) throw new Error("SEADREAM_NO_URL");
+
+    const remoteUrl = await storeRemoteToR2Public(url, `mma/still/${generationId}`);
     working.outputs = { ...(working.outputs || {}), seedream_image_url: remoteUrl };
     working.mg_output_url = remoteUrl;
 
-    // 4) postscan (scan output => still_crt)
+    // ---- postscan ----
     await updateStatus({ supabase, generationId, status: "postscan" });
-    sendStatus(generationId, "postscan");
+    emitStatus(generationId, "postscan");
 
     const tScan = Date.now();
     const outScan = await gptScanOutputStill({ cfg, ctx, imageUrl: remoteUrl });
@@ -1130,24 +1152,24 @@ async function runStillCreatePipeline({ supabase, generationId, passId, vars, pr
         input: { imageUrl: remoteUrl },
         request: outScan.request,
         raw: outScan.raw,
-        output: outScan,
+        output: { still_crt: outScan.still_crt, userMessage: outScan.userMessage, parsed_ok: outScan.parsed_ok },
         timing: { started_at: new Date(tScan).toISOString(), ended_at: nowIso(), duration_ms: Date.now() - tScan },
         error: null,
       },
     });
 
     working.scans = { ...(working.scans || {}), still_crt: outScan.still_crt || null };
-    working = pushUserMessageLine(working, outScan.userMessage || "Done ✅");
-    working.userMessages = { ...(working.userMessages || {}), final_line: "Finished generation." };
+    working = pushUserMessageLine(working, outScan.userMessage || pick(MMA_UI.quickLines.saved_image));
+    working.userMessages = { ...(working.userMessages || {}), final_line: pick(MMA_UI.fallbacks.final) };
 
     await updateVars({ supabase, generationId, vars: working });
-    sendScanLine(generationId, lastScanLine(working, "Done ✅"));
+    emitLine(generationId, working);
 
     await finalizeGeneration({ supabase, generationId, url: remoteUrl, prompt: usedPrompt });
 
     await updateStatus({ supabase, generationId, status: "done" });
-    sendStatus(generationId, "done");
-    sendDone(generationId, "done");
+    emitStatus(generationId, "done");
+    sendDone(generationId, toUserStatus("done"));
   } catch (err) {
     console.error("[mma] still create pipeline error", err);
 
@@ -1161,8 +1183,8 @@ async function runStillCreatePipeline({ supabase, generationId, passId, vars, pr
       .eq("mg_generation_id", generationId)
       .eq("mg_record_type", "generation");
 
-    sendStatus(generationId, "error");
-    sendDone(generationId, "error");
+    emitStatus(generationId, "error");
+    sendDone(generationId, toUserStatus("error"));
   }
 }
 
@@ -1176,29 +1198,27 @@ async function runStillTweakPipeline({ supabase, generationId, passId, parent, v
   let working = vars;
   const ctx = await getMmaCtxConfig(supabase);
 
-  let stepNo = 1;
-
   try {
-    // 1) scanning (parent output + still_crt)
     await updateStatus({ supabase, generationId, status: "scanning" });
-    sendStatus(generationId, "scanning");
+    emitStatus(generationId, "scanning");
 
-    working.ctx = { ...(working.ctx || {}), mma_ctx: ctx };
+    working = setCtxAudit(working, ctx);
     working.scans = { ...(working.scans || {}) };
 
-    working = pushUserMessageLine(working, "Reviewing your last image…");
+    working = pushUserMessageLine(working, pick(MMA_UI.quickLines.still_tweak_start));
     await updateVars({ supabase, generationId, vars: working });
-    sendScanLine(generationId, lastScanLine(working, "Reviewing your last image…"));
+    emitLine(generationId, working);
 
     const parentUrl = asHttpUrl(parent?.mg_output_url);
     if (!parentUrl) throw new Error("PARENT_OUTPUT_URL_MISSING");
 
+    // reuse still_crt if parent already has it
     const parentVars = parent?.mg_mma_vars && typeof parent.mg_mma_vars === "object" ? parent.mg_mma_vars : {};
-    const existingStillCrt =
+    let stillCrt =
       safeStr(parentVars?.scans?.still_crt, "") ||
       safeStr(parentVars?.still_crt, "");
 
-    let stillCrt = existingStillCrt;
+    let stepNo = 1;
 
     if (!stillCrt) {
       const t0 = Date.now();
@@ -1215,7 +1235,7 @@ async function runStillTweakPipeline({ supabase, generationId, passId, parent, v
           input: { imageUrl: parentUrl },
           request: scan.request,
           raw: scan.raw,
-          output: scan,
+          output: { still_crt: scan.still_crt, userMessage: scan.userMessage, parsed_ok: scan.parsed_ok },
           timing: { started_at: new Date(t0).toISOString(), ended_at: nowIso(), duration_ms: Date.now() - t0 },
           error: null,
         },
@@ -1223,18 +1243,16 @@ async function runStillTweakPipeline({ supabase, generationId, passId, parent, v
 
       stillCrt = scan.still_crt || "";
       working.scans.still_crt = stillCrt || null;
-
-      working = pushUserMessageLine(working, scan.userMessage || "Got it — I see what we generated ✅");
+      working = pushUserMessageLine(working, scan.userMessage || pick(MMA_UI.fallbacks.scanned));
       await updateVars({ supabase, generationId, vars: working });
-      sendScanLine(generationId, lastScanLine(working, "Got it — I see what we generated ✅"));
+      emitLine(generationId, working);
     } else {
-      working.scans.still_crt = stillCrt;
+      working.scans.still_crt = stillCrt || null;
       await updateVars({ supabase, generationId, vars: working });
     }
 
-    // 2) prompting (feedback fixer)
     await updateStatus({ supabase, generationId, status: "prompting" });
-    sendStatus(generationId, "prompting");
+    emitStatus(generationId, "prompting");
 
     const feedbackText =
       safeStr(working?.feedback?.still_feedback, "") ||
@@ -1247,7 +1265,7 @@ async function runStillTweakPipeline({ supabase, generationId, passId, parent, v
     if (!feedbackText) throw new Error("MISSING_STILL_FEEDBACK");
 
     const t1 = Date.now();
-    const out = await gptFeedbackFixer({
+    const fix = await gptFeedbackFixer({
       cfg,
       ctx,
       parentImageUrl: parentUrl,
@@ -1271,28 +1289,27 @@ async function runStillTweakPipeline({ supabase, generationId, passId, parent, v
           previous_prompt: safeStr(parent?.mg_prompt, ""),
           preferences: preferences || {},
         },
-        request: out.request,
-        raw: out.raw,
-        output: out,
+        request: fix.request,
+        raw: fix.raw,
+        output: { clean_prompt: fix.clean_prompt, parsed_ok: fix.parsed_ok },
         timing: { started_at: new Date(t1).toISOString(), ended_at: nowIso(), duration_ms: Date.now() - t1 },
         error: null,
       },
     });
 
-    const usedPrompt = safeStr(out.clean_prompt, "");
+    const usedPrompt = safeStr(fix.clean_prompt, "");
     if (!usedPrompt) throw new Error("EMPTY_FEEDBACK_PROMPT");
 
     working.prompts = { ...(working.prompts || {}), clean_prompt: usedPrompt };
-    working = pushUserMessageLine(working, "Applying your feedback… ✨");
+    working = pushUserMessageLine(working, pick(MMA_UI.fallbacks.thinking));
     await updateVars({ supabase, generationId, vars: working });
-    sendScanLine(generationId, lastScanLine(working, "Applying your feedback… ✨"));
+    emitLine(generationId, working);
 
-    // 3) generating (Seedream tweak = parent output image only)
     await updateStatus({ supabase, generationId, status: "generating" });
-    sendStatus(generationId, "generating");
+    emitStatus(generationId, "generating");
 
-    const aspect_ratio =
-      working?.inputs?.aspect_ratio ||
+    const aspectRatio =
+      safeStr(working?.inputs?.aspect_ratio, "") ||
       cfg?.seadream?.aspectRatio ||
       process.env.MMA_SEADREAM_ASPECT_RATIO ||
       "match_input_image";
@@ -1300,25 +1317,22 @@ async function runStillTweakPipeline({ supabase, generationId, passId, parent, v
     const forcedInput = {
       prompt: usedPrompt,
       size: cfg?.seadream?.size || process.env.MMA_SEADREAM_SIZE || "2K",
-      aspect_ratio,
+      aspect_ratio: aspectRatio,
       enhance_prompt: !!cfg?.seadream?.enhancePrompt,
       sequential_image_generation: "disabled",
       max_images: 1,
-      image_input: [parentUrl],
+      image_input: [parentUrl], // ✅ tweak spec: ONLY parent image
     };
 
     const t2 = Date.now();
-    const seed = await runSeedream({
+    const { input, out: seedOut, timing } = await runSeedream({
       prompt: usedPrompt,
-      aspectRatio: aspect_ratio,
+      aspectRatio,
       imageInputs: [parentUrl],
       size: cfg?.seadream?.size,
       enhancePrompt: cfg?.seadream?.enhancePrompt,
       input: forcedInput,
     });
-
-    const seedUrl = pickFirstUrl(seed.out);
-    if (!seedUrl) throw new Error("SEADREAM_NO_URL_TWEAK");
 
     await writeStep({
       supabase,
@@ -1326,20 +1340,22 @@ async function runStillTweakPipeline({ supabase, generationId, passId, parent, v
       passId,
       stepNo: stepNo++,
       stepType: "seedream_generate_tweak",
-      payload: { input: seed.input, output: seed.out, timing: seed.timing, error: null },
+      payload: { input, output: seedOut, timing, error: null },
     });
+
+    const seedUrl = pickFirstUrl(seedOut);
+    if (!seedUrl) throw new Error("SEADREAM_NO_URL_TWEAK");
 
     const remoteUrl = await storeRemoteToR2Public(seedUrl, `mma/still/${generationId}`);
     working.outputs = { ...(working.outputs || {}), seedream_image_url: remoteUrl };
     working.mg_output_url = remoteUrl;
 
-    working = pushUserMessageLine(working, "Saved your improved image ✅");
+    working = pushUserMessageLine(working, pick(MMA_UI.quickLines.saved_image));
     await updateVars({ supabase, generationId, vars: working });
-    sendScanLine(generationId, lastScanLine(working, "Saved your improved image ✅"));
+    emitLine(generationId, working);
 
-    // 4) postscan (scan new output)
     await updateStatus({ supabase, generationId, status: "postscan" });
-    sendStatus(generationId, "postscan");
+    emitStatus(generationId, "postscan");
 
     const t3 = Date.now();
     const scanNew = await gptScanOutputStill({ cfg, ctx, imageUrl: remoteUrl });
@@ -1355,23 +1371,24 @@ async function runStillTweakPipeline({ supabase, generationId, passId, parent, v
         input: { imageUrl: remoteUrl },
         request: scanNew.request,
         raw: scanNew.raw,
-        output: scanNew,
+        output: { still_crt: scanNew.still_crt, userMessage: scanNew.userMessage, parsed_ok: scanNew.parsed_ok },
         timing: { started_at: new Date(t3).toISOString(), ended_at: nowIso(), duration_ms: Date.now() - t3 },
         error: null,
       },
     });
 
     working.scans = { ...(working.scans || {}), still_crt: scanNew.still_crt || stillCrt || "" };
-    working = pushUserMessageLine(working, scanNew.userMessage || "Tweak done ✅");
-    working.userMessages = { ...(working.userMessages || {}), final_line: "Tweak finished." };
+    working = pushUserMessageLine(working, scanNew.userMessage || pick(MMA_UI.fallbacks.final));
+    working.userMessages = { ...(working.userMessages || {}), final_line: pick(MMA_UI.fallbacks.final) };
 
     await updateVars({ supabase, generationId, vars: working });
+    emitLine(generationId, working);
 
     await finalizeGeneration({ supabase, generationId, url: remoteUrl, prompt: usedPrompt });
 
     await updateStatus({ supabase, generationId, status: "done" });
-    sendStatus(generationId, "done");
-    sendDone(generationId, "done");
+    emitStatus(generationId, "done");
+    sendDone(generationId, toUserStatus("done"));
   } catch (err) {
     console.error("[mma] still tweak pipeline error", err);
 
@@ -1385,13 +1402,16 @@ async function runStillTweakPipeline({ supabase, generationId, passId, parent, v
       .eq("mg_generation_id", generationId)
       .eq("mg_record_type", "generation");
 
-    sendStatus(generationId, "error");
-    sendDone(generationId, "error");
+    emitStatus(generationId, "error");
+    sendDone(generationId, toUserStatus("error"));
   }
 }
 
 // ============================================================================
-// VIDEO (Kling) ANIMATE PIPELINE
+// VIDEO ANIMATE PIPELINE (Kling)
+// - optional “type for me” => gpt_motion_suggestion (may be repeated by client)
+// - then gpt_motion_reader2 unless sugg_prompt provided
+// - supports optional end frame (end_image_url)
 // ============================================================================
 async function runVideoAnimatePipeline({ supabase, generationId, passId, parent, vars }) {
   const cfg = getMmaConfig();
@@ -1400,44 +1420,35 @@ async function runVideoAnimatePipeline({ supabase, generationId, passId, parent,
   let working = vars;
   const ctx = await getMmaCtxConfig(supabase);
 
-  let stepNo = 1;
-
   try {
-    // 1) scan start still (still_crt)
     await updateStatus({ supabase, generationId, status: "scanning" });
-    sendStatus(generationId, "scanning");
+    emitStatus(generationId, "scanning");
 
-    working.ctx = { ...(working.ctx || {}), mma_ctx: ctx };
+    working = setCtxAudit(working, ctx);
     working.scans = { ...(working.scans || {}) };
 
-    const parentVars = parent?.mg_mma_vars && typeof parent.mg_mma_vars === "object" ? parent.mg_mma_vars : {};
-    const parentStillCrt =
-      safeStr(parentVars?.scans?.still_crt, "") ||
-      safeStr(parentVars?.still_crt, "");
+    working = pushUserMessageLine(working, pick(MMA_UI.quickLines.video_animate_start));
+    await updateVars({ supabase, generationId, vars: working });
+    emitLine(generationId, working);
 
-    // resolve start + end image
-    const startImage =
-      asHttpUrl(working?.inputs?.start_image_url || working?.inputs?.startImageUrl) ||
-      asHttpUrl(working?.inputs?.parent_output_url || working?.inputs?.parentOutputUrl) ||
-      asHttpUrl(parent?.mg_output_url) ||
-      pickKlingStartImage(working);
+    let stepNo = 1;
 
-    const endImage =
-      asHttpUrl(working?.inputs?.end_image_url || working?.inputs?.endImageUrl) ||
-      asHttpUrl(parentVars?.inputs?.end_image_url || parentVars?.inputs?.endImageUrl) ||
-      pickKlingEndImage(working) ||
-      "";
+    const startImage = pickKlingStartImage(working, parent);
+    const endImage = pickKlingEndImage(working, parent);
 
     if (!startImage) throw new Error("MISSING_START_IMAGE_FOR_VIDEO");
 
-    // store for audit
-    working.inputs = { ...(working.inputs || {}), start_image_url: startImage, end_image_url: endImage || null };
+    // keep for audit
+    working.inputs = { ...(working.inputs || {}), start_image_url: startImage };
+    if (endImage) working.inputs.end_image_url = endImage;
 
-    working = pushUserMessageLine(working, "Reading your image before animating…");
-    await updateVars({ supabase, generationId, vars: working });
-    sendScanLine(generationId, lastScanLine(working, "Reading your image before animating…"));
+    // still_crt reuse if parent has it
+    const parentVars = parent?.mg_mma_vars && typeof parent.mg_mma_vars === "object" ? parent.mg_mma_vars : {};
+    let stillCrt =
+      safeStr(parentVars?.scans?.still_crt, "") ||
+      safeStr(parentVars?.still_crt, "") ||
+      safeStr(working?.scans?.still_crt, "");
 
-    let stillCrt = parentStillCrt;
     if (!stillCrt) {
       const t0 = Date.now();
       const scan = await gptScanOutputStill({ cfg, ctx, imageUrl: startImage });
@@ -1453,7 +1464,7 @@ async function runVideoAnimatePipeline({ supabase, generationId, passId, parent,
           input: { imageUrl: startImage },
           request: scan.request,
           raw: scan.raw,
-          output: scan,
+          output: { still_crt: scan.still_crt, userMessage: scan.userMessage, parsed_ok: scan.parsed_ok },
           timing: { started_at: new Date(t0).toISOString(), ended_at: nowIso(), duration_ms: Date.now() - t0 },
           error: null,
         },
@@ -1462,17 +1473,17 @@ async function runVideoAnimatePipeline({ supabase, generationId, passId, parent,
       stillCrt = scan.still_crt || "";
       working.scans.still_crt = stillCrt || null;
 
-      working = pushUserMessageLine(working, scan.userMessage || "Image understood ✅");
+      working = pushUserMessageLine(working, scan.userMessage || pick(MMA_UI.fallbacks.scanned));
       await updateVars({ supabase, generationId, vars: working });
-      sendScanLine(generationId, lastScanLine(working, "Image understood ✅"));
+      emitLine(generationId, working);
     } else {
-      working.scans.still_crt = stillCrt;
+      working.scans.still_crt = stillCrt || null;
       await updateVars({ supabase, generationId, vars: working });
     }
 
-    // 2) prompting (suggest OR reader2)
+    // ---- prompting ----
     await updateStatus({ supabase, generationId, status: "prompting" });
-    sendStatus(generationId, "prompting");
+    emitStatus(generationId, "prompting");
 
     const motionBrief =
       safeStr(working?.inputs?.motion_user_brief, "") ||
@@ -1490,6 +1501,7 @@ async function runVideoAnimatePipeline({ supabase, generationId, passId, parent,
       working?.inputs?.typeForMe === true ||
       working?.inputs?.use_suggestion === true;
 
+    // if true: frontend is asking only for suggestion and will stop pipeline
     const suggestOnly =
       working?.inputs?.suggest_only === true ||
       working?.inputs?.suggestOnly === true;
@@ -1523,19 +1535,19 @@ async function runVideoAnimatePipeline({ supabase, generationId, passId, parent,
           },
           request: sugg.request,
           raw: sugg.raw,
-          output: sugg,
+          output: { sugg_prompt: sugg.sugg_prompt, userMessage: sugg.userMessage, parsed_ok: sugg.parsed_ok },
           timing: { started_at: new Date(t1).toISOString(), ended_at: nowIso(), duration_ms: Date.now() - t1 },
           error: null,
         },
       });
 
       working.prompts = { ...(working.prompts || {}), sugg_prompt: sugg.sugg_prompt || "" };
-
-      working = pushUserMessageLine(working, sugg.userMessage || "Motion idea ready ✨");
+      working = pushUserMessageLine(working, sugg.userMessage || pick(MMA_UI.fallbacks.thinking));
       await updateVars({ supabase, generationId, vars: working });
-      sendScanLine(generationId, lastScanLine(working, "Motion idea ready ✨"));
+      emitLine(generationId, working);
 
       if (suggestOnly) {
+        // mark as “suggested” and stop (frontend uses returned prompt)
         await supabase
           .from("mega_generations")
           .update({
@@ -1547,16 +1559,15 @@ async function runVideoAnimatePipeline({ supabase, generationId, passId, parent,
           .eq("mg_generation_id", generationId)
           .eq("mg_record_type", "generation");
 
-        sendStatus(generationId, "suggested");
-        sendDone(generationId, "suggested");
+        emitStatus(generationId, "suggested");
+        sendDone(generationId, toUserStatus("suggested"));
         return;
       }
     }
 
-    // final motion prompt: prefer provided sugg_prompt, else run reader2
-    const providedSugg = safeStr(working?.inputs?.sugg_prompt || working?.inputs?.suggPrompt || "");
-    const suggPrompt = providedSugg || safeStr(working?.prompts?.sugg_prompt || "");
-
+    // If sugg_prompt already provided (either from inputs or just created), we may skip reader2.
+    const providedSugg = safeStr(working?.inputs?.sugg_prompt || working?.inputs?.suggPrompt, "");
+    const suggPrompt = providedSugg || safeStr(working?.prompts?.sugg_prompt, "");
     let finalMotionPrompt = suggPrompt;
 
     if (!finalMotionPrompt) {
@@ -1588,7 +1599,7 @@ async function runVideoAnimatePipeline({ supabase, generationId, passId, parent,
           },
           request: rdr.request,
           raw: rdr.raw,
-          output: rdr,
+          output: { motion_prompt: rdr.motion_prompt, userMessage: rdr.userMessage, parsed_ok: rdr.parsed_ok },
           timing: { started_at: new Date(t2).toISOString(), ended_at: nowIso(), duration_ms: Date.now() - t2 },
           error: null,
         },
@@ -1597,48 +1608,45 @@ async function runVideoAnimatePipeline({ supabase, generationId, passId, parent,
       working.prompts = { ...(working.prompts || {}), motion_prompt: rdr.motion_prompt || "" };
       finalMotionPrompt = rdr.motion_prompt || "";
 
-      working = pushUserMessageLine(working, rdr.userMessage || "Motion prompt ready 🎬");
+      working = pushUserMessageLine(working, rdr.userMessage || pick(MMA_UI.fallbacks.thinking));
       await updateVars({ supabase, generationId, vars: working });
-      sendScanLine(generationId, lastScanLine(working, "Motion prompt ready 🎬"));
+      emitLine(generationId, working);
     } else {
+      // keep consistent key
       working.prompts = { ...(working.prompts || {}), motion_prompt: finalMotionPrompt };
       await updateVars({ supabase, generationId, vars: working });
     }
 
     if (!finalMotionPrompt) throw new Error("EMPTY_MOTION_PROMPT");
 
-    // 3) Kling generate
+    // ---- generating ----
     await updateStatus({ supabase, generationId, status: "generating" });
-    sendStatus(generationId, "generating");
+    emitStatus(generationId, "generating");
 
-    const duration =
-      Number(working?.inputs?.duration ?? cfg?.kling?.duration ?? process.env.MMA_KLING_DURATION ?? 5) || 5;
+    const duration = Number(working?.inputs?.duration ?? cfg?.kling?.duration ?? process.env.MMA_KLING_DURATION ?? 5) || 5;
 
-    const requestedMode =
-      safeStr(working?.inputs?.kling_mode || working?.inputs?.mode || "") ||
+    const mode =
+      safeStr(working?.inputs?.kling_mode || working?.inputs?.mode, "") ||
       cfg?.kling?.mode ||
       process.env.MMA_KLING_MODE ||
       "standard";
 
     const neg =
-      safeStr(working?.inputs?.negative_prompt || working?.inputs?.negativePrompt || "") ||
+      safeStr(working?.inputs?.negative_prompt || working?.inputs?.negativePrompt, "") ||
       cfg?.kling?.negativePrompt ||
       process.env.NEGATIVE_PROMPT_KLING ||
       process.env.MMA_NEGATIVE_PROMPT_KLING ||
       "";
 
     const t3 = Date.now();
-    const kling = await runKling({
+    const { input, out, timing } = await runKling({
       prompt: finalMotionPrompt,
       startImage,
       endImage,
       duration,
-      mode: requestedMode,
+      mode,
       negativePrompt: neg,
     });
-
-    const remote = pickFirstUrl(kling.out);
-    if (!remote) throw new Error("KLING_NO_URL");
 
     await writeStep({
       supabase,
@@ -1646,31 +1654,27 @@ async function runVideoAnimatePipeline({ supabase, generationId, passId, parent,
       passId,
       stepNo: stepNo++,
       stepType: "kling_generate",
-      payload: {
-        input: kling.input,
-        output: kling.out,
-        timing: kling.timing || { started_at: new Date(t3).toISOString(), ended_at: nowIso(), duration_ms: Date.now() - t3 },
-        meta: { end_used: !!kling.end_used, end_enabled: KLING_ENABLE_END_IMAGE, end_image_url: endImage || null },
-        error: null,
-      },
+      payload: { input, output: out, timing, error: null },
     });
+
+    const remote = pickFirstUrl(out);
+    if (!remote) throw new Error("KLING_NO_URL");
 
     const remoteUrl = await storeRemoteToR2Public(remote, `mma/video/${generationId}`);
 
     working.outputs = { ...(working.outputs || {}), kling_video_url: remoteUrl };
     working.mg_output_url = remoteUrl;
 
-    working = pushUserMessageLine(working, "Saved your video ✅");
-    working.userMessages = { ...(working.userMessages || {}), final_line: "Finished animation." };
-
+    working = pushUserMessageLine(working, pick(MMA_UI.quickLines.saved_video));
+    working.userMessages = { ...(working.userMessages || {}), final_line: pick(MMA_UI.fallbacks.final) };
     await updateVars({ supabase, generationId, vars: working });
-    sendScanLine(generationId, lastScanLine(working, "Saved your video ✅"));
+    emitLine(generationId, working);
 
     await finalizeGeneration({ supabase, generationId, url: remoteUrl, prompt: finalMotionPrompt });
 
     await updateStatus({ supabase, generationId, status: "done" });
-    sendStatus(generationId, "done");
-    sendDone(generationId, "done");
+    emitStatus(generationId, "done");
+    sendDone(generationId, toUserStatus("done"));
   } catch (err) {
     console.error("[mma] video animate pipeline error", err);
 
@@ -1684,13 +1688,13 @@ async function runVideoAnimatePipeline({ supabase, generationId, passId, parent,
       .eq("mg_generation_id", generationId)
       .eq("mg_record_type", "generation");
 
-    sendStatus(generationId, "error");
-    sendDone(generationId, "error");
+    emitStatus(generationId, "error");
+    sendDone(generationId, toUserStatus("error"));
   }
 }
 
 // ============================================================================
-// VIDEO (Kling) TWEAK PIPELINE
+// VIDEO TWEAK PIPELINE (Kling)
 // ============================================================================
 async function runVideoTweakPipeline({ supabase, generationId, passId, parent, vars }) {
   const cfg = getMmaConfig();
@@ -1699,14 +1703,18 @@ async function runVideoTweakPipeline({ supabase, generationId, passId, parent, v
   let working = vars;
   const ctx = await getMmaCtxConfig(supabase);
 
-  let stepNo = 1;
-
   try {
     await updateStatus({ supabase, generationId, status: "scanning" });
-    sendStatus(generationId, "scanning");
+    emitStatus(generationId, "scanning");
 
-    working.ctx = { ...(working.ctx || {}), mma_ctx: ctx };
+    working = setCtxAudit(working, ctx);
     working.scans = { ...(working.scans || {}) };
+
+    working = pushUserMessageLine(working, pick(MMA_UI.quickLines.video_tweak_start));
+    await updateVars({ supabase, generationId, vars: working });
+    emitLine(generationId, working);
+
+    let stepNo = 1;
 
     const parentVars = parent?.mg_mma_vars && typeof parent.mg_mma_vars === "object" ? parent.mg_mma_vars : {};
 
@@ -1724,16 +1732,14 @@ async function runVideoTweakPipeline({ supabase, generationId, passId, parent, v
 
     if (!startImage) throw new Error("MISSING_START_IMAGE_FOR_VIDEO_TWEAK");
 
-    working.inputs = { ...(working.inputs || {}), start_image_url: startImage, end_image_url: endImage || null };
+    working.inputs = { ...(working.inputs || {}), start_image_url: startImage };
+    if (endImage) working.inputs.end_image_url = endImage;
 
+    // still_crt reuse or scan
     let stillCrt =
       safeStr(parentVars?.scans?.still_crt, "") ||
       safeStr(parentVars?.still_crt, "") ||
       safeStr(working?.scans?.still_crt, "");
-
-    working = pushUserMessageLine(working, "Re-reading your still before tweaking motion…");
-    await updateVars({ supabase, generationId, vars: working });
-    sendScanLine(generationId, lastScanLine(working, "Re-reading your still before tweaking motion…"));
 
     if (!stillCrt) {
       const t0 = Date.now();
@@ -1750,7 +1756,7 @@ async function runVideoTweakPipeline({ supabase, generationId, passId, parent, v
           input: { imageUrl: startImage },
           request: scan.request,
           raw: scan.raw,
-          output: scan,
+          output: { still_crt: scan.still_crt, userMessage: scan.userMessage, parsed_ok: scan.parsed_ok },
           timing: { started_at: new Date(t0).toISOString(), ended_at: nowIso(), duration_ms: Date.now() - t0 },
           error: null,
         },
@@ -1759,17 +1765,17 @@ async function runVideoTweakPipeline({ supabase, generationId, passId, parent, v
       stillCrt = scan.still_crt || "";
       working.scans.still_crt = stillCrt || null;
 
-      working = pushUserMessageLine(working, scan.userMessage || "Still understood ✅");
+      working = pushUserMessageLine(working, scan.userMessage || pick(MMA_UI.fallbacks.scanned));
       await updateVars({ supabase, generationId, vars: working });
-      sendScanLine(generationId, lastScanLine(working, "Still understood ✅"));
+      emitLine(generationId, working);
     } else {
-      working.scans.still_crt = stillCrt;
+      working.scans.still_crt = stillCrt || null;
       await updateVars({ supabase, generationId, vars: working });
     }
 
-    // 2) prompting feedback2
+    // ---- prompting ----
     await updateStatus({ supabase, generationId, status: "prompting" });
-    sendStatus(generationId, "prompting");
+    emitStatus(generationId, "prompting");
 
     const motionBrief =
       safeStr(working?.inputs?.motion_user_brief, "") ||
@@ -1826,7 +1832,7 @@ async function runVideoTweakPipeline({ supabase, generationId, passId, parent, v
         input: { ...baseInput, feedback_motion: feedbackMotion, previous_motion_prompt: prevMotionPrompt },
         request: fix.request,
         raw: fix.raw,
-        output: fix,
+        output: { motion_prompt: fix.motion_prompt, parsed_ok: fix.parsed_ok },
         timing: { started_at: new Date(t1).toISOString(), ended_at: nowIso(), duration_ms: Date.now() - t1 },
         error: null,
       },
@@ -1836,51 +1842,41 @@ async function runVideoTweakPipeline({ supabase, generationId, passId, parent, v
     if (!finalMotionPrompt) throw new Error("EMPTY_MOTION_FEEDBACK_PROMPT");
 
     working.prompts = { ...(working.prompts || {}), motion_prompt: finalMotionPrompt };
-
-    working = pushUserMessageLine(working, "Applying your motion feedback… 🎬✨");
+    working = pushUserMessageLine(working, pick(MMA_UI.fallbacks.thinking));
     await updateVars({ supabase, generationId, vars: working });
-    sendScanLine(generationId, lastScanLine(working, "Applying your motion feedback… 🎬✨"));
+    emitLine(generationId, working);
 
-    // 3) Kling generate (tweak)
+    // ---- generating ----
     await updateStatus({ supabase, generationId, status: "generating" });
-    sendStatus(generationId, "generating");
+    emitStatus(generationId, "generating");
 
     const duration =
-      Number(
-        working?.inputs?.duration ??
-        parentVars?.inputs?.duration ??
-        cfg?.kling?.duration ??
-        process.env.MMA_KLING_DURATION ??
-        5
-      ) || 5;
+      Number(working?.inputs?.duration ?? parentVars?.inputs?.duration ?? cfg?.kling?.duration ?? process.env.MMA_KLING_DURATION ?? 5) || 5;
 
-    const requestedMode =
-      safeStr(working?.inputs?.kling_mode || working?.inputs?.mode || "") ||
-      safeStr(parentVars?.inputs?.kling_mode || parentVars?.inputs?.mode || "") ||
+    const mode =
+      safeStr(working?.inputs?.kling_mode || working?.inputs?.mode, "") ||
+      safeStr(parentVars?.inputs?.kling_mode || parentVars?.inputs?.mode, "") ||
       cfg?.kling?.mode ||
       process.env.MMA_KLING_MODE ||
       "standard";
 
     const neg =
-      safeStr(working?.inputs?.negative_prompt || working?.inputs?.negativePrompt || "") ||
-      safeStr(parentVars?.inputs?.negative_prompt || parentVars?.inputs?.negativePrompt || "") ||
+      safeStr(working?.inputs?.negative_prompt || working?.inputs?.negativePrompt, "") ||
+      safeStr(parentVars?.inputs?.negative_prompt || parentVars?.inputs?.negativePrompt, "") ||
       cfg?.kling?.negativePrompt ||
       process.env.NEGATIVE_PROMPT_KLING ||
       process.env.MMA_NEGATIVE_PROMPT_KLING ||
       "";
 
     const t2 = Date.now();
-    const kling = await runKling({
+    const { input, out, timing } = await runKling({
       prompt: finalMotionPrompt,
       startImage,
       endImage,
       duration,
-      mode: requestedMode,
+      mode,
       negativePrompt: neg,
     });
-
-    const remote = pickFirstUrl(kling.out);
-    if (!remote) throw new Error("KLING_NO_URL_TWEAK");
 
     await writeStep({
       supabase,
@@ -1888,31 +1884,28 @@ async function runVideoTweakPipeline({ supabase, generationId, passId, parent, v
       passId,
       stepNo: stepNo++,
       stepType: "kling_generate_tweak",
-      payload: {
-        input: kling.input,
-        output: kling.out,
-        timing: kling.timing || { started_at: new Date(t2).toISOString(), ended_at: nowIso(), duration_ms: Date.now() - t2 },
-        meta: { end_used: !!kling.end_used, end_enabled: KLING_ENABLE_END_IMAGE, end_image_url: endImage || null },
-        error: null,
-      },
+      payload: { input, output: out, timing, error: null },
     });
+
+    const remote = pickFirstUrl(out);
+    if (!remote) throw new Error("KLING_NO_URL_TWEAK");
 
     const remoteUrl = await storeRemoteToR2Public(remote, `mma/video/${generationId}`);
 
     working.outputs = { ...(working.outputs || {}), kling_video_url: remoteUrl };
     working.mg_output_url = remoteUrl;
 
-    working = pushUserMessageLine(working, "Saved your updated video ✅");
-    working.userMessages = { ...(working.userMessages || {}), final_line: "Motion tweak finished." };
+    working = pushUserMessageLine(working, pick(MMA_UI.quickLines.saved_video));
+    working.userMessages = { ...(working.userMessages || {}), final_line: pick(MMA_UI.fallbacks.final) };
 
     await updateVars({ supabase, generationId, vars: working });
-    sendScanLine(generationId, lastScanLine(working, "Saved your updated video ✅"));
+    emitLine(generationId, working);
 
     await finalizeGeneration({ supabase, generationId, url: remoteUrl, prompt: finalMotionPrompt });
 
     await updateStatus({ supabase, generationId, status: "done" });
-    sendStatus(generationId, "done");
-    sendDone(generationId, "done");
+    emitStatus(generationId, "done");
+    sendDone(generationId, toUserStatus("done"));
   } catch (err) {
     console.error("[mma] video tweak pipeline error", err);
 
@@ -1926,13 +1919,13 @@ async function runVideoTweakPipeline({ supabase, generationId, passId, parent, v
       .eq("mg_generation_id", generationId)
       .eq("mg_record_type", "generation");
 
-    sendStatus(generationId, "error");
-    sendDone(generationId, "error");
+    emitStatus(generationId, "error");
+    sendDone(generationId, toUserStatus("error"));
   }
 }
 
 // ============================================================================
-// Public controller API
+// Public handlers
 // ============================================================================
 export async function handleMmaStillTweak({ parentGenerationId, body }) {
   const supabase = getSupabaseAdmin();
@@ -2028,13 +2021,13 @@ export async function handleMmaVideoTweak({ parentGenerationId, body }) {
   vars.meta = { ...(vars.meta || {}), flow: "video_tweak", parent_generation_id: parentGenerationId };
   vars.inputs = { ...(vars.inputs || {}), parent_generation_id: parentGenerationId };
 
-  // Carry start/end if parent had them (audit + consistency)
+  // keep parent start/end images if present (audit + consistent tweak)
   const parentVars = parent?.mg_mma_vars && typeof parent.mg_mma_vars === "object" ? parent.mg_mma_vars : {};
-  const parentStart = asHttpUrl(parentVars?.inputs?.start_image_url || parentVars?.inputs?.startImageUrl) || "";
-  const parentEnd = asHttpUrl(parentVars?.inputs?.end_image_url || parentVars?.inputs?.endImageUrl) || "";
+  const parentStart = asHttpUrl(parentVars?.inputs?.start_image_url || parentVars?.inputs?.startImageUrl);
+  const parentEnd = asHttpUrl(parentVars?.inputs?.end_image_url || parentVars?.inputs?.endImageUrl);
 
-  if (parentStart && !vars.inputs.start_image_url) vars.inputs.start_image_url = parentStart;
-  if (parentEnd && !vars.inputs.end_image_url) vars.inputs.end_image_url = parentEnd;
+  if (parentStart) vars.inputs.start_image_url = parentStart;
+  if (parentEnd) vars.inputs.end_image_url = parentEnd;
 
   await writeGeneration({
     supabase,
@@ -2097,23 +2090,24 @@ export async function handleMmaCreate({ mode, body }) {
     vars.meta = { ...(vars.meta || {}), flow: "still_create" };
     await updateVars({ supabase, generationId, vars });
 
-    runStillCreatePipeline({ supabase, generationId, passId, vars, preferences }).catch((err) => {
-      console.error("[mma] still create pipeline error", err);
-    });
+    runStillCreatePipeline({ supabase, generationId, passId, vars, preferences }).catch((err) =>
+      console.error("[mma] still create pipeline error", err)
+    );
   } else if (mode === "video") {
     const parent = parentId ? await fetchParentGenerationRow(supabase, parentId) : null;
 
     vars.meta = { ...(vars.meta || {}), flow: "video_animate", parent_generation_id: parentId || null };
 
+    // if animating from a still, store parent output url for audit + start_image
     if (parent?.mg_output_url) {
       vars.inputs = { ...(vars.inputs || {}), parent_output_url: parent.mg_output_url };
     }
 
     await updateVars({ supabase, generationId, vars });
 
-    runVideoAnimatePipeline({ supabase, generationId, passId, parent, vars }).catch((err) => {
-      console.error("[mma] video animate pipeline error", err);
-    });
+    runVideoAnimatePipeline({ supabase, generationId, passId, parent, vars }).catch((err) =>
+      console.error("[mma] video animate pipeline error", err)
+    );
   } else {
     await updateStatus({ supabase, generationId, status: "error" });
     await supabase
@@ -2161,7 +2155,7 @@ export async function handleMmaEvent(body) {
     mg_updated_at: nowIso(),
   });
 
-  // keep existing preference-write logic
+  // preference updates kept minimal here (same logic you had)
   if (body?.event_type === "like" || body?.event_type === "dislike" || body?.event_type === "preference_set") {
     const { data } = await supabase
       .from("mega_customers")
@@ -2191,6 +2185,9 @@ export async function handleMmaEvent(body) {
   return { event_id: eventId, status: "ok" };
 }
 
+// ============================================================================
+// Fetch + admin helpers
+// ============================================================================
 export async function fetchGeneration(generationId) {
   const supabase = getSupabaseAdmin();
   if (!supabase) throw new Error("SUPABASE_NOT_CONFIGURED");
@@ -2207,7 +2204,7 @@ export async function fetchGeneration(generationId) {
 
   return {
     generation_id: data.mg_generation_id,
-    status: data.mg_mma_status || data.mg_status,
+    status: toUserStatus(data.mg_mma_status || data.mg_status),
     mma_vars: data.mg_mma_vars || {},
     outputs: {
       seedream_image_url: data.mg_mma_mode === "still" ? data.mg_output_url : null,
@@ -2252,9 +2249,9 @@ export function registerSseClient(generationId, res, initial) {
   addSseClient(generationId, res, initial);
 }
 
-// -----------------------------------------------------------------------------
-// Factory expected by server boot
-// -----------------------------------------------------------------------------
+// ============================================================================
+// Router factory
+// ============================================================================
 export function createMmaController() {
   const router = express.Router();
 
@@ -2344,7 +2341,7 @@ export function createMmaController() {
       .maybeSingle();
 
     const scanLines = data?.mg_mma_vars?.userMessages?.scan_lines || [];
-    const status = data?.mg_mma_status || "queued";
+    const status = toUserStatus(data?.mg_mma_status || "queued"); // ✅ don’t leak internal status
 
     const keepAlive = setInterval(() => {
       try {
