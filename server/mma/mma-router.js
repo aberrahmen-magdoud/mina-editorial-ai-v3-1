@@ -1,10 +1,14 @@
-// ./server/mma/mma-router.js Part 3: Express router for Mina Mind API
+// ./server/mma/mma-router.js
+// Part 3: Express router for Mina Mind API
 // Part 3.1: Routes fan out to controller helpers and expose SSE replay.
+
 import express from "express";
 import {
   fetchGeneration,
   handleMmaCreate,
   handleMmaEvent,
+  handleMmaStillTweak,
+  handleMmaVideoTweak,
   listErrors,
   listSteps,
   registerSseClient,
@@ -13,6 +17,28 @@ import { getSupabaseAdmin } from "../../supabase.js";
 
 const router = express.Router();
 
+// -----------------------------------------------------------------------------
+// UI-safe status mapping (prevents leaking internal pipeline steps)
+// -----------------------------------------------------------------------------
+const UI_STATUS_MAP = {
+  queued: "working",
+  scanning: "working",
+  prompting: "working",
+  generating: "working",
+  postscan: "working",
+  suggested: "ready",
+  done: "done",
+  error: "error",
+};
+
+function toUserStatus(internalStatus) {
+  const s = String(internalStatus || "queued");
+  return UI_STATUS_MAP[s] || "working";
+}
+
+// -----------------------------------------------------------------------------
+// STILL
+// -----------------------------------------------------------------------------
 router.post("/still/create", async (req, res) => {
   try {
     const result = await handleMmaCreate({ mode: "still", body: req.body, req });
@@ -23,12 +49,12 @@ router.post("/still/create", async (req, res) => {
   }
 });
 
+// ✅ IMPORTANT: tweak route must call handleMmaStillTweak (not handleMmaCreate)
 router.post("/still/:generation_id/tweak", async (req, res) => {
   try {
-    const result = await handleMmaCreate({
-      mode: "still",
-      body: { ...req.body, parent_generation_id: req.params.generation_id },
-      req,
+    const result = await handleMmaStillTweak({
+      parentGenerationId: req.params.generation_id,
+      body: req.body || {},
     });
     res.json(result);
   } catch (err) {
@@ -37,6 +63,9 @@ router.post("/still/:generation_id/tweak", async (req, res) => {
   }
 });
 
+// -----------------------------------------------------------------------------
+// VIDEO
+// -----------------------------------------------------------------------------
 router.post("/video/animate", async (req, res) => {
   try {
     const result = await handleMmaCreate({ mode: "video", body: req.body, req });
@@ -47,12 +76,12 @@ router.post("/video/animate", async (req, res) => {
   }
 });
 
+// ✅ IMPORTANT: tweak route must call handleMmaVideoTweak (not handleMmaCreate)
 router.post("/video/:generation_id/tweak", async (req, res) => {
   try {
-    const result = await handleMmaCreate({
-      mode: "video",
-      body: { ...req.body, parent_generation_id: req.params.generation_id },
-      req,
+    const result = await handleMmaVideoTweak({
+      parentGenerationId: req.params.generation_id,
+      body: req.body || {},
     });
     res.json(result);
   } catch (err) {
@@ -61,6 +90,9 @@ router.post("/video/:generation_id/tweak", async (req, res) => {
   }
 });
 
+// -----------------------------------------------------------------------------
+// EVENTS
+// -----------------------------------------------------------------------------
 router.post("/events", async (req, res) => {
   try {
     const result = await handleMmaEvent(req.body || {}, req);
@@ -71,6 +103,9 @@ router.post("/events", async (req, res) => {
   }
 });
 
+// -----------------------------------------------------------------------------
+// GENERATIONS
+// -----------------------------------------------------------------------------
 router.get("/generations/:generation_id", async (req, res) => {
   try {
     const payload = await fetchGeneration(req.params.generation_id);
@@ -82,6 +117,9 @@ router.get("/generations/:generation_id", async (req, res) => {
   }
 });
 
+// -----------------------------------------------------------------------------
+// SSE STREAM (replay + live)
+// -----------------------------------------------------------------------------
 router.get("/stream/:generation_id", async (req, res) => {
   try {
     const supabase = getSupabaseAdmin();
@@ -103,7 +141,6 @@ router.get("/stream/:generation_id", async (req, res) => {
       .maybeSingle();
 
     if (error) {
-      // Send an SSE error frame then close
       try {
         res.write(`event: error\ndata: ${JSON.stringify({ error: "SSE_BOOTSTRAP_FAILED" })}\n\n`);
       } catch {}
@@ -111,7 +148,9 @@ router.get("/stream/:generation_id", async (req, res) => {
     }
 
     const scanLines = data?.mg_mma_vars?.userMessages?.scan_lines || [];
-    const status = data?.mg_mma_status || "queued";
+
+    // ✅ Don't leak internal statuses (scanning/prompting/etc.)
+    const status = toUserStatus(data?.mg_mma_status || "queued");
 
     // Keepalive (Render/proxies like this)
     const keepAlive = setInterval(() => {
@@ -130,6 +169,9 @@ router.get("/stream/:generation_id", async (req, res) => {
   }
 });
 
+// -----------------------------------------------------------------------------
+// ADMIN
+// -----------------------------------------------------------------------------
 router.get("/admin/errors", async (_req, res) => {
   try {
     const errors = await listErrors();
