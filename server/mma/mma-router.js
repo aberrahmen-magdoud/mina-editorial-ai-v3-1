@@ -1,15 +1,18 @@
 // ./server/mma/mma-router.js
-// Part 3: Express router for Mina Mind API
-// Part 3.1: Routes fan out to controller helpers and expose SSE replay.
+// Express router for Mina Mind API
+// Routes fan out to controller helpers and expose SSE replay.
 
 import express from "express";
 import {
   fetchGeneration,
   handleMmaCreate,
   handleMmaEvent,
+  handleMmaStillTweak,
+  handleMmaVideoTweak,
   listErrors,
   listSteps,
   registerSseClient,
+  toUserStatus,
 } from "./mma-controller.js";
 import { getSupabaseAdmin } from "../../supabase.js";
 
@@ -30,20 +33,23 @@ const router = express.Router();
 const MMA_CREDIT_COSTS = {
   still: 1, // image
   video: 5, // video
-  type: 0,  // “type for me” / text-only
+  type: 0,  // text-only (suggest/prompt-only)
 };
 
-// If any of these appear in the request, we treat it as text-only (0 credits)
+// If any of these appear in the request intent, we treat it as text-only (0 credits)
 const MMA_ZERO_CREDIT_INTENTS = new Set([
   "type",
   "type_for_me",
-  "typeForMe",
+  "typeforme",
   "typing",
   "text",
   "text_only",
-  "textOnly",
+  "textonly",
   "prompt_only",
-  "promptOnly",
+  "promptonly",
+  "suggest",
+  "suggest_only",
+  "suggestonly",
 ]);
 
 // Ledger idempotency
@@ -76,27 +82,44 @@ function extractGenerationId(result, fallback = null) {
   return gid || null;
 }
 
-function isTypeForMe({ body = {}, result = {} } = {}) {
+function hasTextOnlyFlags(body = {}) {
+  // top-level
+  if (body?.suggestOnly === true || body?.suggest_only === true) return true;
+  if (body?.textOnly === true || body?.text_only === true) return true;
+  if (body?.promptOnly === true || body?.prompt_only === true) return true;
+  if (body?.onlyText === true || body?.only_text === true) return true;
+
+  // nested inputs (common)
+  if (body?.inputs?.suggestOnly === true || body?.inputs?.suggest_only === true) return true;
+  if (body?.inputs?.textOnly === true || body?.inputs?.text_only === true) return true;
+  if (body?.inputs?.promptOnly === true || body?.inputs?.prompt_only === true) return true;
+  if (body?.inputs?.onlyText === true || body?.inputs?.only_text === true) return true;
+
+  return false;
+}
+
+function isTextOnlyRequest({ body = {}, result = {} } = {}) {
+  // Explicit flags always win
+  if (hasTextOnlyFlags(body)) return true;
+
+  // Intent/action string
   const intent =
     body?.intent ||
     body?.action ||
+    body?.op ||
+    body?.operation ||
     body?.mode ||
     body?.type ||
-    body?.op ||
-    body?.operation;
+    body?.inputs?.intent ||
+    body?.inputs?.action ||
+    body?.inputs?.op;
 
   const s = safeString(intent, "").toLowerCase();
   if (s && MMA_ZERO_CREDIT_INTENTS.has(s)) return true;
 
-  // Some callers pass flags
-  if (body?.typeForMe === true) return true;
-  if (body?.textOnly === true) return true;
-  if (body?.onlyText === true) return true;
-  if (body?.promptOnly === true) return true;
-
   // Or result comes back text-like
   const rt = safeString(result?.resultType || result?.type || result?.kind || "", "").toLowerCase();
-  if (rt && (rt === "text" || rt === "typing")) return true;
+  if (rt && (rt === "text" || rt === "typing" || rt === "suggestion")) return true;
 
   const ct = safeString(result?.contentType || result?.content_type || "", "").toLowerCase();
   if (ct && ct.startsWith("text/")) return true;
@@ -105,7 +128,8 @@ function isTypeForMe({ body = {}, result = {} } = {}) {
 }
 
 function inferCost({ mode, body, result }) {
-  if (isTypeForMe({ body, result })) return MMA_CREDIT_COSTS.type;
+  // Only zero-credit when request is truly text-only (suggest/prompt-only)
+  if (isTextOnlyRequest({ body, result })) return MMA_CREDIT_COSTS.type;
   if (mode === "video") return MMA_CREDIT_COSTS.video;
   return MMA_CREDIT_COSTS.still;
 }
@@ -158,14 +182,13 @@ router.post("/still/create", async (req, res) => {
     const preCost = inferCost({ mode: "still", body: req.body || {}, result: {} });
     await ensureEnoughCreditsOrThrow(passId, preCost);
 
-    const result = await handleMmaCreate({ mode: "still", body: req.body, req });
+    const result = await handleMmaCreate({ mode: "still", body: req.body });
 
     // Charge on success (based on body + actual result)
     const cost = inferCost({ mode: "still", body: req.body || {}, result });
     const gid = extractGenerationId(result, null);
     await chargeOnSuccess({ passId, cost, generationId: gid, mode: "still" });
 
-    // Optional: attach billing info (safe; frontend can ignore)
     if (result && typeof result === "object") {
       result.billing = { cost, mode: "still" };
     }
@@ -190,10 +213,10 @@ router.post("/still/:generation_id/tweak", async (req, res) => {
     const preCost = inferCost({ mode: "still", body: req.body || {}, result: {} });
     await ensureEnoughCreditsOrThrow(passId, preCost);
 
-    const result = await handleMmaCreate({
-      mode: "still",
-      body: { ...req.body, parent_generation_id: req.params.generation_id },
-      req,
+    // ✅ Correct handler (tweak pipeline)
+    const result = await handleMmaStillTweak({
+      parentGenerationId: req.params.generation_id,
+      body: req.body || {},
     });
 
     const cost = inferCost({ mode: "still", body: req.body || {}, result });
@@ -224,7 +247,7 @@ router.post("/video/animate", async (req, res) => {
     const preCost = inferCost({ mode: "video", body: req.body || {}, result: {} });
     await ensureEnoughCreditsOrThrow(passId, preCost);
 
-    const result = await handleMmaCreate({ mode: "video", body: req.body, req });
+    const result = await handleMmaCreate({ mode: "video", body: req.body });
 
     const cost = inferCost({ mode: "video", body: req.body || {}, result });
     const gid = extractGenerationId(result, null);
@@ -254,10 +277,10 @@ router.post("/video/:generation_id/tweak", async (req, res) => {
     const preCost = inferCost({ mode: "video", body: req.body || {}, result: {} });
     await ensureEnoughCreditsOrThrow(passId, preCost);
 
-    const result = await handleMmaCreate({
-      mode: "video",
-      body: { ...req.body, parent_generation_id: req.params.generation_id },
-      req,
+    // ✅ Correct handler (tweak pipeline)
+    const result = await handleMmaVideoTweak({
+      parentGenerationId: req.params.generation_id,
+      body: req.body || {},
     });
 
     const cost = inferCost({ mode: "video", body: req.body || {}, result });
@@ -281,8 +304,8 @@ router.post("/video/:generation_id/tweak", async (req, res) => {
 
 router.post("/events", async (req, res) => {
   try {
-    // ✅ Never charge credits for events (type-for-me/motion-suggest etc.)
-    const result = await handleMmaEvent(req.body || {}, req);
+    // ✅ Never charge credits for events
+    const result = await handleMmaEvent(req.body || {});
     res.json(result);
   } catch (err) {
     console.error("[mma] events error", err);
@@ -329,7 +352,7 @@ router.get("/stream/:generation_id", async (req, res) => {
     }
 
     const scanLines = data?.mg_mma_vars?.userMessages?.scan_lines || [];
-    const status = data?.mg_mma_status || "queued";
+    const status = toUserStatus(data?.mg_mma_status || "queued"); // ✅ don't leak internals
 
     const keepAlive = setInterval(() => {
       try {
