@@ -22,11 +22,6 @@ import { getMmaConfig } from "./mma-config.js";
 
 // ============================================================================
 // USER-FACING TEXT (EDIT THESE)
-// - The ONLY place you should tweak wording.
-// - Keep them friendly and NOT technical (no “scanning”, “prompting”, “kling”, etc).
-// ============================================================================
-// ============================================================================
-// USER-FACING TEXT (EDIT THESE)
 // - The ONLY place you should tweak wording
 // - These lines are what the frontend will see as the SSE status text
 // - No "working" no technical words just Mina talking
@@ -49,7 +44,7 @@ const MMA_UI = {
       "give me a moment i am turning your idea into something i can frame",
       "i am getting serious now which means i am sipping and staring into space",
       "i was built for this but i still like to make an entrance",
-      "okay okay i am coming i just want the matcha to be perfect for you"
+      "okay okay i am coming i just want the matcha to be perfect for you",
     ],
 
     scanning: [
@@ -67,7 +62,7 @@ const MMA_UI = {
       "i am collecting clues like a detective but make it editorial",
       "i am noticing the small things because small things are the whole thing",
       "quiet moment now i am absorbing your vibe and your intention",
-      "i see it i see what you are trying to say and i am smiling internally"
+      "i see it i see what you are trying to say and i am smiling internally",
     ],
 
     prompting: [
@@ -85,7 +80,7 @@ const MMA_UI = {
       "if inspiration had a sound it would be whisk whisk then a soft hmm",
       "i am thinking about nostalgia like a warm room you forgot you loved",
       "you do not need perfect words i can work with a feeling you know",
-      "okay i have it and yes i am proud of myself for a machine"
+      "okay i have it and yes i am proud of myself for a machine",
     ],
 
     generating: [
@@ -103,7 +98,7 @@ const MMA_UI = {
       "i am working and also quietly rooting for you at the same time",
       "this is not just a result it is a little editorial moment with a point of view",
       "i am making it feel like a memory you cannot place but you trust",
-      "stay with me you are closer to the result than your doubt wants you to believe"
+      "stay with me you are closer to the result than your doubt wants you to believe",
     ],
 
     postscan: [
@@ -121,7 +116,7 @@ const MMA_UI = {
       "i am making sure it feels editorial not accidental",
       "if something feels off i will adjust it like moving one flower one centimeter",
       "almost there and you are doing great just for showing up with an idea",
-      "okay yes now it feels like Mina like taste like intention like calm power"
+      "okay yes now it feels like Mina like taste like intention like calm power",
     ],
 
     suggested: [
@@ -139,7 +134,7 @@ const MMA_UI = {
       "look at it like a magazine page you are the editor now",
       "you can change the mood in one sentence and i will follow you",
       "okay showtime i am handing it to you like a fresh cup",
-      "go on tell me what you want next i am listening"
+      "go on tell me what you want next i am listening",
     ],
 
     done: [
@@ -157,7 +152,7 @@ const MMA_UI = {
       "i cannot feel pride like humans do but i can recognize it in you",
       "you are allowed to want more and you are allowed to refine",
       "all set and listen your vision is real even before it is finished",
-      "okay we did it now take that momentum and do something bold with it"
+      "okay we did it now take that momentum and do something bold with it",
     ],
 
     error: [
@@ -175,7 +170,7 @@ const MMA_UI = {
       "tell me what you want changed and i will come back sharper",
       "even genius humans hit errors they just call it process",
       "okay again but with more clarity and less drama unless you want drama",
-      "we try again and this time it behaves because i am watching it"
+      "we try again and this time it behaves because i am watching it",
     ],
   },
 
@@ -184,22 +179,22 @@ const MMA_UI = {
     still_create_start: [
       "one sec getting everything ready",
       "alright setting things up for you",
-      "love it let me prep your inputs"
+      "love it let me prep your inputs",
     ],
     still_tweak_start: [
       "got it lets refine that",
       "okay making it even better",
-      "lets polish this up"
+      "lets polish this up",
     ],
     video_animate_start: [
       "nice lets bring it to life",
       "okay animating this for you",
-      "lets make it move"
+      "lets make it move",
     ],
     video_tweak_start: [
       "got it updating the motion",
       "alright tweaking the animation",
-      "lets refine the movement"
+      "lets refine the movement",
     ],
     saved_image: ["saved it for you", "all set", "done"],
     saved_video: ["saved it for you", "your clip is ready", "done"],
@@ -331,9 +326,17 @@ function emitLine(generationId, vars, fallbackText = "") {
   const line = lastScanLine(vars, fallbackText);
   sendScanLine(generationId, line);
 }
+
 // Keep Mina talking during long steps (Seedream / Kling)
 // Sends a new friendly line every few seconds as a scan_line
-function startMinaChatter({ supabase, generationId, getVars, setVars, stage = "generating", intervalMs = 2600 }) {
+function startMinaChatter({
+  supabase,
+  generationId,
+  getVars,
+  setVars,
+  stage = "generating",
+  intervalMs = 2600,
+}) {
   let stopped = false;
 
   const tick = async () => {
@@ -373,7 +376,6 @@ function setCtxAudit(vars, ctx) {
   next.ctx = { ...(next.ctx || {}), mma_ctx_used: ctx };
   return next;
 }
-
 // ============================================================================
 // ctx config (editable in mega_admin)
 // table: mega_admin row: mg_record_type='app_config', mg_key='mma_ctx', mg_value json
@@ -381,16 +383,16 @@ function setCtxAudit(vars, ctx) {
 async function getMmaCtxConfig(supabase) {
   const defaults = {
     scanner: [
-      "You are Mina GPTscanner.",
+      "You are image scanner.",
       "You will be given ONE image. Understand it.",
       'Output STRICT JSON only (no markdown): {"crt":string,"userMessage":string}',
-      "crt: short factual description of the image in ONE sentence (max 220 chars).",
+      "crt: short factual description of the image in ONE sentence (max 120 chars).",
       "If it's product/logo/inspiration, hint that in crt.",
       MMA_UI.userMessageRules,
     ].join("\n"),
 
     like_history: [
-      "You are Mina Style Memory.",
+      "You are keyword extractor for memory style.",
       "You will receive a list of the user's recently liked generations (prompts and sometimes images).",
       'Output STRICT JSON only: {"style_history_csv":string}',
       "style_history_csv: comma-separated keywords (5 to 12 items). No hashtags. No sentences.",
@@ -399,7 +401,7 @@ async function getMmaCtxConfig(supabase) {
     ].join("\n"),
 
     reader: [
-      "You are Mina Mind — prompt builder for Seedream (still image only).",
+      "you are a prompt writer for text/image to image AI",
       "You will receive product_crt/logo_crt/inspiration_crt + user brief + style + style_history.",
       'Output STRICT JSON only (no markdown): {"clean_prompt":string,"userMessage":string}',
       "clean_prompt must be Seedream-ready, photoreal editorial, concise but detailed.",
@@ -552,6 +554,7 @@ async function getMmaCtxConfig(supabase) {
   }
 }
 
+
 // ============================================================================
 // OpenAI vision JSON helper (Responses API preferred, Chat Completions fallback)
 // ============================================================================
@@ -578,7 +581,6 @@ function buildResponsesUserContentLabeled({ introText, labeledImages }) {
     const url = asHttpUrl(item?.url);
     if (!url) continue;
 
-    // Label right before each image so the model knows what it is
     if (role) parts.push({ type: "input_text", text: `IMAGE ROLE: ${role}` });
     parts.push({ type: "input_image", image_url: url });
   }
@@ -952,7 +954,10 @@ function buildSeedreamImageInputs(vars) {
   const logo = asHttpUrl(assets.logo_image_url || assets.logoImageUrl);
 
   const styleHero = asHttpUrl(
-    assets.style_hero_image_url || assets.styleHeroImageUrl || assets.style_hero_url || assets.styleHeroUrl
+    assets.style_hero_image_url ||
+      assets.styleHeroImageUrl ||
+      assets.style_hero_url ||
+      assets.styleHeroUrl
   );
 
   const inspiration = safeArray(
@@ -980,7 +985,8 @@ async function runSeedream({ prompt, aspectRatio, imageInputs = [], size, enhanc
   const cfg = getMmaConfig();
 
   const sizeValue = size || cfg?.seadream?.size || process.env.MMA_SEADREAM_SIZE || "2K";
-  const defaultAspect = cfg?.seadream?.aspectRatio || process.env.MMA_SEADREAM_ASPECT_RATIO || "match_input_image";
+  const defaultAspect =
+    cfg?.seadream?.aspectRatio || process.env.MMA_SEADREAM_ASPECT_RATIO || "match_input_image";
 
   const version =
     process.env.MMA_SEADREAM_VERSION ||
@@ -1031,7 +1037,11 @@ async function runSeedream({ prompt, aspectRatio, imageInputs = [], size, enhanc
   return {
     input,
     out,
-    timing: { started_at: new Date(t0).toISOString(), ended_at: nowIso(), duration_ms: Date.now() - t0 },
+    timing: {
+      started_at: new Date(t0).toISOString(),
+      ended_at: nowIso(),
+      duration_ms: Date.now() - t0,
+    },
   };
 }
 
@@ -1062,7 +1072,15 @@ function pickKlingEndImage(vars, parent) {
   );
 }
 
-async function runKling({ prompt, startImage, endImage, duration, mode, negativePrompt, input: forcedInput }) {
+async function runKling({
+  prompt,
+  startImage,
+  endImage,
+  duration,
+  mode,
+  negativePrompt,
+  input: forcedInput,
+}) {
   const replicate = getReplicate();
   const cfg = getMmaConfig();
 
@@ -1084,11 +1102,7 @@ async function runKling({ prompt, startImage, endImage, duration, mode, negative
 
   const hasEnd = !!asHttpUrl(endImage);
   const finalMode =
-    safeStr(mode, "") ||
-    (hasEnd ? "pro" : "") ||
-    cfg?.kling?.mode ||
-    process.env.MMA_KLING_MODE ||
-    "standard";
+    safeStr(mode, "") || (hasEnd ? "pro" : "") || cfg?.kling?.mode || process.env.MMA_KLING_MODE || "standard";
 
   const input = forcedInput
     ? { ...forcedInput }
@@ -1113,7 +1127,11 @@ async function runKling({ prompt, startImage, endImage, duration, mode, negative
   return {
     input,
     out,
-    timing: { started_at: new Date(t0).toISOString(), ended_at: nowIso(), duration_ms: Date.now() - t0 },
+    timing: {
+      started_at: new Date(t0).toISOString(),
+      ended_at: nowIso(),
+      duration_ms: Date.now() - t0,
+    },
   };
 }
 
@@ -1122,7 +1140,8 @@ async function runKling({ prompt, startImage, endImage, duration, mode, negative
 // ============================================================================
 function getR2() {
   const accountId = process.env.R2_ACCOUNT_ID || "";
-  const endpoint = process.env.R2_ENDPOINT || (accountId ? `https://${accountId}.r2.cloudflarestorage.com` : "");
+  const endpoint =
+    process.env.R2_ENDPOINT || (accountId ? `https://${accountId}.r2.cloudflarestorage.com` : "");
 
   const accessKeyId = process.env.R2_ACCESS_KEY_ID || "";
   const secretAccessKey = process.env.R2_SECRET_ACCESS_KEY || "";
@@ -1386,6 +1405,8 @@ async function runStillCreatePipeline({ supabase, generationId, passId, vars, pr
   let working = vars;
   const ctx = await getMmaCtxConfig(supabase);
 
+  let chatter = null;
+
   try {
     // status: working
     await updateStatus({ supabase, generationId, status: "prompting" });
@@ -1404,7 +1425,10 @@ async function runStillCreatePipeline({ supabase, generationId, passId, vars, pr
     const logoUrl = asHttpUrl(assets.logo_image_url || assets.logoImageUrl);
 
     const styleHero = asHttpUrl(
-      assets.style_hero_image_url || assets.styleHeroImageUrl || assets.style_hero_url || assets.styleHeroUrl
+      assets.style_hero_image_url ||
+        assets.styleHeroImageUrl ||
+        assets.style_hero_url ||
+        assets.styleHeroUrl
     );
 
     const inspUrls = safeArray(
@@ -1469,6 +1493,18 @@ async function runStillCreatePipeline({ supabase, generationId, passId, vars, pr
     await updateStatus({ supabase, generationId, status: "generating" });
     emitStatus(generationId, "generating");
 
+    // keep Mina talking while the render is happening
+    chatter = startMinaChatter({
+      supabase,
+      generationId,
+      getVars: () => working,
+      setVars: (v) => {
+        working = v;
+      },
+      stage: "generating",
+      intervalMs: 2600,
+    });
+
     const imageInputs = buildSeedreamImageInputs(working);
 
     // aspect ratio selection (if no input images, avoid match_input_image)
@@ -1485,13 +1521,23 @@ async function runStillCreatePipeline({ supabase, generationId, passId, vars, pr
         "1:1";
     }
 
-    const { input, out, timing } = await runSeedream({
-      prompt: usedPrompt,
-      aspectRatio,
-      imageInputs,
-      size: cfg?.seadream?.size,
-      enhancePrompt: cfg?.seadream?.enhancePrompt,
-    });
+    let seedRes;
+    try {
+      seedRes = await runSeedream({
+        prompt: usedPrompt,
+        aspectRatio,
+        imageInputs,
+        size: cfg?.seadream?.size,
+        enhancePrompt: cfg?.seadream?.enhancePrompt,
+      });
+    } finally {
+      try {
+        chatter?.stop?.();
+      } catch {}
+      chatter = null;
+    }
+
+    const { input, out, timing } = seedRes;
 
     await writeStep({
       supabase,
@@ -1520,6 +1566,11 @@ async function runStillCreatePipeline({ supabase, generationId, passId, vars, pr
     emitStatus(generationId, "done");
     sendDone(generationId, toUserStatus("done"));
   } catch (err) {
+    try {
+      chatter?.stop?.();
+    } catch {}
+    chatter = null;
+
     console.error("[mma] still create pipeline error", err);
 
     await updateStatus({ supabase, generationId, status: "error" });
@@ -1546,6 +1597,8 @@ async function runStillTweakPipeline({ supabase, generationId, passId, parent, v
 
   let working = vars;
   const ctx = await getMmaCtxConfig(supabase);
+
+  let chatter = null;
 
   try {
     await updateStatus({ supabase, generationId, status: "prompting" });
@@ -1611,6 +1664,17 @@ async function runStillTweakPipeline({ supabase, generationId, passId, parent, v
     await updateStatus({ supabase, generationId, status: "generating" });
     emitStatus(generationId, "generating");
 
+    chatter = startMinaChatter({
+      supabase,
+      generationId,
+      getVars: () => working,
+      setVars: (v) => {
+        working = v;
+      },
+      stage: "generating",
+      intervalMs: 2600,
+    });
+
     let aspectRatio =
       safeStr(working?.inputs?.aspect_ratio, "") ||
       cfg?.seadream?.aspectRatio ||
@@ -1618,7 +1682,6 @@ async function runStillTweakPipeline({ supabase, generationId, passId, parent, v
       "match_input_image";
 
     // tweak always has parent image input, so match_input_image is safe
-
     const forcedInput = {
       prompt: usedPrompt,
       size: cfg?.seadream?.size || process.env.MMA_SEADREAM_SIZE || "2K",
@@ -1629,15 +1692,24 @@ async function runStillTweakPipeline({ supabase, generationId, passId, parent, v
       image_input: [parentUrl],
     };
 
-    const t1 = Date.now();
-    const { input, out: seedOut, timing } = await runSeedream({
-      prompt: usedPrompt,
-      aspectRatio,
-      imageInputs: [parentUrl],
-      size: cfg?.seadream?.size,
-      enhancePrompt: cfg?.seadream?.enhancePrompt,
-      input: forcedInput,
-    });
+    let seedRes;
+    try {
+      seedRes = await runSeedream({
+        prompt: usedPrompt,
+        aspectRatio,
+        imageInputs: [parentUrl],
+        size: cfg?.seadream?.size,
+        enhancePrompt: cfg?.seadream?.enhancePrompt,
+        input: forcedInput,
+      });
+    } finally {
+      try {
+        chatter?.stop?.();
+      } catch {}
+      chatter = null;
+    }
+
+    const { input, out: seedOut, timing } = seedRes;
 
     await writeStep({
       supabase,
@@ -1665,6 +1737,11 @@ async function runStillTweakPipeline({ supabase, generationId, passId, parent, v
     emitStatus(generationId, "done");
     sendDone(generationId, toUserStatus("done"));
   } catch (err) {
+    try {
+      chatter?.stop?.();
+    } catch {}
+    chatter = null;
+
     console.error("[mma] still tweak pipeline error", err);
 
     await updateStatus({ supabase, generationId, status: "error" });
@@ -1684,9 +1761,6 @@ async function runStillTweakPipeline({ supabase, generationId, passId, parent, v
 
 // ============================================================================
 // VIDEO ANIMATE PIPELINE (Kling)
-// - optional “type for me” => gpt_motion_suggestion (may be repeated by client)
-// - then gpt_motion_reader2 unless sugg_prompt provided
-// - supports optional end frame (end_image_url)
 // ============================================================================
 async function runVideoAnimatePipeline({ supabase, generationId, passId, parent, vars }) {
   const cfg = getMmaConfig();
@@ -1694,6 +1768,8 @@ async function runVideoAnimatePipeline({ supabase, generationId, passId, parent,
 
   let working = vars;
   const ctx = await getMmaCtxConfig(supabase);
+
+  let chatter = null;
 
   try {
     await updateStatus({ supabase, generationId, status: "prompting" });
@@ -1792,6 +1868,17 @@ async function runVideoAnimatePipeline({ supabase, generationId, passId, parent,
     await updateStatus({ supabase, generationId, status: "generating" });
     emitStatus(generationId, "generating");
 
+    chatter = startMinaChatter({
+      supabase,
+      generationId,
+      getVars: () => working,
+      setVars: (v) => {
+        working = v;
+      },
+      stage: "generating",
+      intervalMs: 2600,
+    });
+
     const duration =
       Number(working?.inputs?.duration ?? cfg?.kling?.duration ?? process.env.MMA_KLING_DURATION ?? 5) || 5;
 
@@ -1808,15 +1895,24 @@ async function runVideoAnimatePipeline({ supabase, generationId, passId, parent,
       process.env.MMA_NEGATIVE_PROMPT_KLING ||
       "";
 
-    const t1 = Date.now();
-    const { input, out, timing } = await runKling({
-      prompt: finalMotionPrompt,
-      startImage,
-      endImage,
-      duration,
-      mode,
-      negativePrompt: neg,
-    });
+    let klingRes;
+    try {
+      klingRes = await runKling({
+        prompt: finalMotionPrompt,
+        startImage,
+        endImage,
+        duration,
+        mode,
+        negativePrompt: neg,
+      });
+    } finally {
+      try {
+        chatter?.stop?.();
+      } catch {}
+      chatter = null;
+    }
+
+    const { input, out, timing } = klingRes;
 
     await writeStep({
       supabase,
@@ -1845,6 +1941,11 @@ async function runVideoAnimatePipeline({ supabase, generationId, passId, parent,
     emitStatus(generationId, "done");
     sendDone(generationId, toUserStatus("done"));
   } catch (err) {
+    try {
+      chatter?.stop?.();
+    } catch {}
+    chatter = null;
+
     console.error("[mma] video animate pipeline error", err);
 
     await updateStatus({ supabase, generationId, status: "error" });
@@ -1871,6 +1972,8 @@ async function runVideoTweakPipeline({ supabase, generationId, passId, parent, v
 
   let working = vars;
   const ctx = await getMmaCtxConfig(supabase);
+
+  let chatter = null;
 
   try {
     await updateStatus({ supabase, generationId, status: "prompting" });
@@ -1907,8 +2010,7 @@ async function runVideoTweakPipeline({ supabase, generationId, passId, parent, v
     if (!feedbackMotion) throw new Error("MISSING_MOTION_FEEDBACK");
 
     const prevMotionPrompt =
-      safeStr(parentVars?.prompts?.motion_prompt, "") ||
-      safeStr(parent?.mg_prompt, "");
+      safeStr(parentVars?.prompts?.motion_prompt, "") || safeStr(parent?.mg_prompt, "");
 
     const oneShotInput = {
       start_image_url: startImage,
@@ -1956,9 +2058,25 @@ async function runVideoTweakPipeline({ supabase, generationId, passId, parent, v
     await updateStatus({ supabase, generationId, status: "generating" });
     emitStatus(generationId, "generating");
 
+    chatter = startMinaChatter({
+      supabase,
+      generationId,
+      getVars: () => working,
+      setVars: (v) => {
+        working = v;
+      },
+      stage: "generating",
+      intervalMs: 2600,
+    });
+
     const duration =
-      Number(working?.inputs?.duration ?? parentVars?.inputs?.duration ?? cfg?.kling?.duration ?? process.env.MMA_KLING_DURATION ?? 5) ||
-      5;
+      Number(
+        working?.inputs?.duration ??
+          parentVars?.inputs?.duration ??
+          cfg?.kling?.duration ??
+          process.env.MMA_KLING_DURATION ??
+          5
+      ) || 5;
 
     const mode =
       safeStr(working?.inputs?.kling_mode || working?.inputs?.mode, "") ||
@@ -1975,15 +2093,24 @@ async function runVideoTweakPipeline({ supabase, generationId, passId, parent, v
       process.env.MMA_NEGATIVE_PROMPT_KLING ||
       "";
 
-    const t1 = Date.now();
-    const { input, out, timing } = await runKling({
-      prompt: finalMotionPrompt,
-      startImage,
-      endImage,
-      duration,
-      mode,
-      negativePrompt: neg,
-    });
+    let klingRes;
+    try {
+      klingRes = await runKling({
+        prompt: finalMotionPrompt,
+        startImage,
+        endImage,
+        duration,
+        mode,
+        negativePrompt: neg,
+      });
+    } finally {
+      try {
+        chatter?.stop?.();
+      } catch {}
+      chatter = null;
+    }
+
+    const { input, out, timing } = klingRes;
 
     await writeStep({
       supabase,
@@ -2012,6 +2139,11 @@ async function runVideoTweakPipeline({ supabase, generationId, passId, parent, v
     emitStatus(generationId, "done");
     sendDone(generationId, toUserStatus("done"));
   } catch (err) {
+    try {
+      chatter?.stop?.();
+    } catch {}
+    chatter = null;
+
     console.error("[mma] video tweak pipeline error", err);
 
     await updateStatus({ supabase, generationId, status: "error" });
@@ -2078,9 +2210,7 @@ export async function handleMmaStillTweak({ parentGenerationId, body }) {
   const platform = safeStr(body?.platform || body?.inputs?.platform, "") || safeStr(parent?.mg_platform, "") || "web";
 
   const title =
-    safeStr(body?.title || body?.inputs?.title, "") ||
-    safeStr(parent?.mg_title, "") ||
-    "Image session";
+    safeStr(body?.title || body?.inputs?.title, "") || safeStr(parent?.mg_title, "") || "Image session";
 
   vars.inputs = { ...(vars.inputs || {}), session_id: sessionId, platform, title };
   vars.meta = { ...(vars.meta || {}), session_id: sessionId, platform, title };
@@ -2155,14 +2285,10 @@ export async function handleMmaVideoTweak({ parentGenerationId, body }) {
     newUuid();
 
   const platform =
-    safeStr(body?.platform || body?.inputs?.platform, "") ||
-    safeStr(parent?.mg_platform, "") ||
-    "web";
+    safeStr(body?.platform || body?.inputs?.platform, "") || safeStr(parent?.mg_platform, "") || "web";
 
   const title =
-    safeStr(body?.title || body?.inputs?.title, "") ||
-    safeStr(parent?.mg_title, "") ||
-    "Video session";
+    safeStr(body?.title || body?.inputs?.title, "") || safeStr(parent?.mg_title, "") || "Video session";
 
   vars.inputs = { ...(vars.inputs || {}), session_id: sessionId, platform, title };
   vars.meta = { ...(vars.meta || {}), session_id: sessionId, platform, title };
@@ -2215,11 +2341,7 @@ export async function handleMmaCreate({ mode, body }) {
       email: body?.email,
     });
 
-  const parentId =
-    body?.parent_generation_id ||
-    body?.parentGenerationId ||
-    body?.generation_id ||
-    null;
+  const parentId = body?.parent_generation_id || body?.parentGenerationId || body?.generation_id || null;
 
   const generationId = newUuid();
 
@@ -2250,9 +2372,7 @@ export async function handleMmaCreate({ mode, body }) {
     newUuid();
 
   const platform =
-    safeStr(body?.platform || body?.inputs?.platform, "") ||
-    safeStr(parent?.mg_platform, "") ||
-    "web";
+    safeStr(body?.platform || body?.inputs?.platform, "") || safeStr(parent?.mg_platform, "") || "web";
 
   const title =
     safeStr(body?.title || body?.inputs?.title, "") ||
