@@ -128,22 +128,84 @@ const MMA_UI = {
   ].join("\n"),
 };
 
-// always return ONE human line never "working" never arrays
-export function toUserStatus(internalStatus) {
-  const s = String(internalStatus || "queued");
-  const v = MMA_UI?.statusMap?.[s];
+// ============================================================================
+// One BIG randomized pool for ALL user-facing lines
+// - status text + scan_line text pull from the same pool
+// - add anything you want into MMA_UI.extraLines
+// ============================================================================
 
-  if (Array.isArray(v)) return pick(v, pick(MMA_UI?.statusMap?.queued, ""));
-  if (typeof v === "string" && v.trim()) return v.trim();
-
-  return pick(MMA_UI?.statusMap?.queued, "");
+function _cleanLine(x) {
+  if (x === null || x === undefined) return "";
+  const s = (typeof x === "string" ? x : String(x)).trim();
+  return s || "";
 }
+
+function _toLineList(v) {
+  if (!v) return [];
+  if (Array.isArray(v)) return v.map(_cleanLine).filter(Boolean);
+  const s = _cleanLine(v);
+  return s ? [s] : [];
+}
+
+function _flattenObject(obj) {
+  const out = [];
+  if (!obj || typeof obj !== "object") return out;
+  for (const v of Object.values(obj)) out.push(..._toLineList(v));
+  return out;
+}
+
+function _dedupe(arr) {
+  const seen = new Set();
+  const out = [];
+  for (const s of arr) {
+    if (!s) continue;
+    if (seen.has(s)) continue;
+    seen.add(s);
+    out.push(s);
+  }
+  return out;
+}
+
+// ✅ you can paste any extra lines here (ex-frontend lines) and they’ll get mixed in
+if (!Array.isArray(MMA_UI.extraLines)) MMA_UI.extraLines = [];
+
+// Build once at boot
+const MMA_BIG_POOL = _dedupe([
+  ..._flattenObject(MMA_UI.statusMap),
+  ..._flattenObject(MMA_UI.fallbacks),
+  ..._toLineList(MMA_UI.extraLines),
+]);
 
 function pick(arr, fallback = "") {
   const a = Array.isArray(arr) ? arr.filter(Boolean) : [];
   if (!a.length) return fallback;
   return a[Math.floor(Math.random() * a.length)];
 }
+
+function mixedPool(stage) {
+  const stageLines = _toLineList(MMA_UI?.statusMap?.[stage]);
+  return stageLines.length ? _dedupe([...stageLines, ...MMA_BIG_POOL]) : MMA_BIG_POOL;
+}
+
+function pickAvoid(pool, avoidText, fallback = "") {
+  const avoid = _cleanLine(avoidText);
+  const a = Array.isArray(pool) ? pool.filter(Boolean) : [];
+  if (!a.length) return fallback;
+
+  if (avoid) {
+    const b = a.filter((x) => x !== avoid);
+    if (b.length) return b[Math.floor(Math.random() * b.length)];
+  }
+  return a[Math.floor(Math.random() * a.length)];
+}
+
+// always return ONE human line (randomized + mixed)
+export function toUserStatus(internalStatus) {
+  const stage = String(internalStatus || "queued");
+  const pool = mixedPool(stage);
+  return pickAvoid(pool, "", pick(MMA_UI?.statusMap?.queued, "okay"));
+}
+
 
 // ============================================================================
 // Clients (cached singletons)
@@ -256,7 +318,8 @@ function startMinaChatter({
     if (stopped) return;
     try {
       let v = getVars();
-      const line = pick(MMA_UI?.statusMap?.[stage], "");
+      const avoid = (lastScanLine(getVars?.() || v || {}, "") || {}).text || "";
+      const line = pickAvoid(mixedPool(stage), avoid, "");
       if (!line) return;
 
       v = pushUserMessageLine(v, line);
@@ -339,7 +402,7 @@ async function getMmaCtxConfig(supabase) {
     ].join("\n"),
 
     still_tweak_one_shot: [
-      "understand the user tweaks and give one line prompt describing the image,  always type editorial still life, dont describe the light ever and use simple english",
+      "understand the user tweaks and give one line prompt describing the image, always type editorial still life, dont describe the light ever it always creamy highlight and use simple english",
       "",
       "OUTPUT FORMAT:",
       'Return STRICT JSON only (no markdown): {"clean_prompt": string}',
