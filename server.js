@@ -253,21 +253,53 @@ function creditsFromOrder(order) {
   const items = Array.isArray(order?.line_items) ? order.line_items : [];
   let credits = 0;
 
+  // Helper: parse SKUs like "MINA-50" => 50
+  function parseMinaSkuCredits(skuRaw) {
+    const sku = String(skuRaw || "").trim().toUpperCase();
+
+    // Accept MINA-50, MINA-100, MINA-150, etc.
+    // (allows extra suffix too, like MINA-50-TEST, but only reads the first number)
+    const m = sku.match(/^MINA-(\d+)\b/);
+    if (!m) return 0;
+
+    const n = Number(m[1]);
+    if (!Number.isFinite(n)) return 0;
+
+    // Safety clamp (optional): prevents insane credits if someone misconfigures a SKU
+    const clamped = Math.max(0, Math.min(100000, Math.floor(n)));
+    return clamped;
+  }
+
   for (const li of items) {
     const sku = String(li?.sku || "").trim();
     const variantId = li?.variant_id != null ? String(li.variant_id) : "";
 
-    if (SHOPIFY_WELCOME_MATCHA_VARIANT_ID && variantId === SHOPIFY_WELCOME_MATCHA_VARIANT_ID) {
-      credits += 50;
+    // Shopify quantity (default 1)
+    const qtyRaw = li?.quantity;
+    const qty = Math.max(1, Number.isFinite(Number(qtyRaw)) ? Math.floor(Number(qtyRaw)) : 1);
+
+    // 1) Your “forever” rule: MINA-<N> => N credits per unit
+    const minaPerUnit = parseMinaSkuCredits(sku);
+    if (minaPerUnit > 0) {
+      credits += minaPerUnit * qty;
       continue;
     }
 
+    // 3) Optional fallback: CREDIT_PRODUCT_MAP (SKU or variant_id)
+    let perUnit = 0;
     if (sku && Object.prototype.hasOwnProperty.call(CREDIT_PRODUCT_MAP, sku)) {
-      credits += Number(CREDIT_PRODUCT_MAP[sku] || 0);
+      perUnit = Number(CREDIT_PRODUCT_MAP[sku] || 0);
+    } else if (variantId && Object.prototype.hasOwnProperty.call(CREDIT_PRODUCT_MAP, variantId)) {
+      perUnit = Number(CREDIT_PRODUCT_MAP[variantId] || 0);
     }
+
+    if (perUnit > 0) credits += perUnit * qty;
   }
+
   return credits;
 }
+
+
 // ======================================================
 // Shopify ↔ MEGA passId reconciliation helpers
 // ======================================================
