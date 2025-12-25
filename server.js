@@ -468,44 +468,14 @@ app.use(express.urlencoded({ extended: true, limit: "25mb" }));
 app.use(historyRouter);
 
 // ======================================================
-// MMA: force consistent passId + enforce credits pricing
-// Pricing:
-// - still image create/tweak: 1 credit
-// - video animate/tweak: 5 credits
-// - "type for me" suggestion only: 0 credit (inputs.suggest_only = true)
+// MMA: force consistent passId (NO charging here anymore)
+// Charging + refunds are handled inside mma-controller pipelines.
 // ======================================================
 app.use("/mma", async (req, res, next) => {
   try {
-    // Only charge on generation-start POST endpoints
+    // only normalize passId on POST (so controller uses a stable one)
     if (req.method !== "POST") return next();
 
-    const path = String(req.path || "");
-
-    // Never charge on these
-    if (path.startsWith("/stream/")) return next();
-    if (path.startsWith("/generations/")) return next();
-    if (path === "/events") return next();
-
-    // Determine cost by endpoint
-    let cost = 0;
-
-    const isStillCreate = path === "/still/create";
-    const isStillTweak = /^\/still\/[^/]+\/tweak$/.test(path);
-
-    const isVideoAnimate = path === "/video/animate";
-    const isVideoTweak = /^\/video\/[^/]+\/tweak$/.test(path);
-
-    if (isStillCreate || isStillTweak) cost = 1;
-    if (isVideoAnimate || isVideoTweak) cost = 5;
-
-    // "type for me" suggestion-only must be FREE
-    const inputs = (req.body && req.body.inputs && typeof req.body.inputs === "object") ? req.body.inputs : {};
-    const suggestOnly = inputs.suggest_only === true || inputs.suggestOnly === true;
-    const typeForMe = inputs.type_for_me === true || inputs.typeForMe === true || inputs.use_suggestion === true;
-
-    if (suggestOnly && typeForMe) cost = 0;
-
-    // Resolve passId ONCE (and inject it so MMA controller uses the same one)
     const resolved = resolvePassIdForRequest(req, req.body || {});
     const passId = normalizeIncomingPassId(resolved);
     setPassIdHeader(res, passId);
@@ -514,7 +484,7 @@ app.use("/mma", async (req, res, next) => {
     if (!req.body.passId) req.body.passId = passId;
     if (!req.body.pass_id) req.body.pass_id = passId;
 
-    // Ensure customer row exists
+    // ensure row exists (optional but keeps your DB clean)
     if (sbEnabled()) {
       const authUser = await getAuthUser(req);
       await megaEnsureCustomer({
@@ -524,41 +494,14 @@ app.use("/mma", async (req, res, next) => {
       });
     }
 
-    // If cost is zero, continue
-    if (cost <= 0) return next();
-
-    // If no Supabase configured, MMA would fail anyway
-    if (!sbEnabled()) {
-      return res.status(503).json({ ok: false, error: "NO_SUPABASE" });
-    }
-
-    // Check balance
-    const { credits } = await megaGetCredits(passId);
-    if (Number(credits || 0) < cost) {
-      return res.status(402).json({
-        ok: false,
-        error: "INSUFFICIENT_CREDITS",
-        passId,
-        balance: Number(credits || 0),
-        needed: cost,
-      });
-    }
-
-    // Charge immediately (best effort)
-    await megaAdjustCredits({
-      passId,
-      delta: -cost,
-      reason: cost === 1 ? "mma_image" : "mma_video",
-      source: "mma",
-      refType: "mma_charge",
-      refId: `req:${Date.now()}_${crypto.randomUUID()}`,
-      grantedAt: nowIso(),
-    });
-
     return next();
   } catch (e) {
-    console.error("[mma credits middleware] failed", e);
-    return res.status(500).json({ ok: false, error: "MMA_CREDITS_FAILED", message: e?.message || String(e) });
+    console.error("[mma passId middleware] failed", e);
+    return res.status(500).json({
+      ok: false,
+      error: "MMA_PASSID_MW_FAILED",
+      message: e?.message || String(e),
+    });
   }
 });
 
