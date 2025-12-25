@@ -1383,7 +1383,6 @@ async function runStillCreatePipeline({ supabase, generationId, passId, vars, pr
       .concat(productUrl ? [{ role: "PRODUCT", url: productUrl }] : [])
       .concat(logoUrl ? [{ role: "LOGO", url: logoUrl }] : [])
       .concat(inspUrls.map((u, i) => ({ role: `INSPIRATION_${i + 1}`, url: u })))
-      .concat(styleHero ? [{ role: "STYLE_HERO", url: styleHero }] : [])
       .slice(0, 10);
 
     // Input to GPT (no aspect ratio needed)
