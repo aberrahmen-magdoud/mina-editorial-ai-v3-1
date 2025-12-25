@@ -4,7 +4,14 @@ import OpenAI from "openai";
 import Replicate from "replicate";
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 
-import { megaEnsureCustomer, megaWriteSession } from "../../mega-db.js";
+import {
+  megaEnsureCustomer,
+  megaWriteSession,
+  megaGetCredits,
+  megaAdjustCredits,
+  megaHasCreditRef,
+} from "../../mega-db.js";
+
 import { getSupabaseAdmin } from "../../supabase.js";
 
 import {
@@ -1143,6 +1150,214 @@ async function storeRemoteToR2Public(url, keyPrefix) {
 // ============================================================================
 // DB helpers
 // ============================================================================
+// ============================================================================
+// CREDITS (controller-owned)
+// - still create/tweak: 1 credit
+// - video animate/tweak: 5 credits
+// - type-for-me (suggest_only): charge 1 credit per 10 SUCCESSFUL suggestions
+// - refund on failure:
+//    - non-safety errors: always refund
+//    - safety blocks: 1 courtesy refund per UTC day (per passId)
+// ============================================================================
+const MMA_COSTS = {
+  still: 1,
+  video: 5,
+  typeForMePer: 10,      // every 10 successes
+  typeForMeCharge: 1,    // charge 1 credit
+};
+
+function utcDayKey() {
+  // yyyy-mm-dd in UTC
+  return nowIso().slice(0, 10);
+}
+
+function makeHttpError(statusCode, code, extra = {}) {
+  const err = new Error(code);
+  err.statusCode = statusCode;
+  err.code = code;
+  Object.assign(err, extra);
+  return err;
+}
+
+async function ensureEnoughCredits(passId, needed) {
+  const { credits } = await megaGetCredits(passId);
+  const bal = Number(credits || 0);
+  if (bal < Number(needed || 0)) {
+    throw makeHttpError(402, "INSUFFICIENT_CREDITS", {
+      passId,
+      balance: bal,
+      needed: Number(needed || 0),
+    });
+  }
+  return { balance: bal };
+}
+
+async function readMmaPreferences(supabase, passId) {
+  try {
+    const { data } = await supabase
+      .from("mega_customers")
+      .select("mg_mma_preferences")
+      .eq("mg_pass_id", passId)
+      .maybeSingle();
+
+    const prefs = data?.mg_mma_preferences;
+    return prefs && typeof prefs === "object" ? prefs : {};
+  } catch {
+    return {};
+  }
+}
+
+async function writeMmaPreferences(supabase, passId, nextPrefs) {
+  try {
+    await supabase
+      .from("mega_customers")
+      .update({
+        mg_mma_preferences: nextPrefs,
+        mg_mma_preferences_updated_at: nowIso(),
+        mg_updated_at: nowIso(),
+      })
+      .eq("mg_pass_id", passId);
+  } catch {
+    // best effort
+  }
+}
+
+function isSafetyBlockError(err) {
+  const msg = String(err?.message || err || "").toLowerCase();
+
+  // keep this simple + wide; adjust later once you see real provider messages
+  return (
+    msg.includes("nsfw") ||
+    msg.includes("nud") ||
+    msg.includes("nude") ||
+    msg.includes("sexual") ||
+    msg.includes("safety") ||
+    msg.includes("policy") ||
+    msg.includes("content") && msg.includes("block")
+  );
+}
+
+// Charge once per generation (idempotent)
+async function chargeGeneration({ passId, generationId, cost, reason }) {
+  const c = Number(cost || 0);
+  if (c <= 0) return { charged: false, cost: 0 };
+
+  const refType = "mma_charge";
+  const refId = `mma:${generationId}`;
+
+  const already = await megaHasCreditRef({ refType, refId });
+  if (already) return { charged: true, already: true, cost: c };
+
+  await ensureEnoughCredits(passId, c);
+
+  await megaAdjustCredits({
+    passId,
+    delta: -c,
+    reason: reason || "mma_charge",
+    source: "mma",
+    refType,
+    refId,
+    grantedAt: nowIso(),
+  });
+
+  return { charged: true, cost: c };
+}
+
+// Refund on failure (idempotent). Safety blocks: 1 courtesy refund/day.
+async function refundOnFailure({ supabase, passId, generationId, cost, err }) {
+  const c = Number(cost || 0);
+  if (c <= 0) return { refunded: false, cost: 0 };
+
+  const refType = "mma_refund";
+  const refId = `mma:${generationId}`;
+
+  const already = await megaHasCreditRef({ refType, refId });
+  if (already) return { refunded: false, already: true, cost: c };
+
+  const safety = isSafetyBlockError(err);
+
+  if (safety) {
+    const today = utcDayKey();
+    const prefs = await readMmaPreferences(supabase, passId);
+
+    // one courtesy per UTC day
+    if (prefs?.courtesy_safety_refund_day === today) {
+      return { refunded: false, blockedByDailyLimit: true, safety: true, cost: c };
+    }
+
+    // mark used (best-effort, reduces races)
+    await writeMmaPreferences(supabase, passId, {
+      ...prefs,
+      courtesy_safety_refund_day: today,
+    });
+  }
+
+  await megaAdjustCredits({
+    passId,
+    delta: +c,
+    reason: safety ? "mma_safety_refund" : "mma_refund",
+    source: "mma",
+    refType,
+    refId,
+    grantedAt: nowIso(),
+  });
+
+  return { refunded: true, safety, cost: c };
+}
+
+// TYPE FOR ME (suggest_only) meter:
+// - charge 1 credit per 10 SUCCESSFUL suggestions
+// - preflight: if next success would be a charge point, require 1 credit
+async function preflightTypeForMe({ supabase, passId }) {
+  const prefs = await readMmaPreferences(supabase, passId);
+  const n = Number(prefs?.type_for_me_success_count || 0) || 0;
+  const next = n + 1;
+
+  // if next success hits the paywall point, ensure user has 1 credit
+  if (next % MMA_COSTS.typeForMePer === 0) {
+    await ensureEnoughCredits(passId, MMA_COSTS.typeForMeCharge);
+  }
+
+  return { prefs, successCount: n };
+}
+
+async function commitTypeForMeSuccessAndMaybeCharge({ supabase, passId }) {
+  const prefs = await readMmaPreferences(supabase, passId);
+  const n = Number(prefs?.type_for_me_success_count || 0) || 0;
+  const next = n + 1;
+
+  // write the success counter (best effort)
+  await writeMmaPreferences(supabase, passId, {
+    ...prefs,
+    type_for_me_success_count: next,
+  });
+
+  // every 10th success => charge 1 credit (idempotent per bucket)
+  if (next % MMA_COSTS.typeForMePer !== 0) return { charged: false, successCount: next };
+
+  const bucket = Math.floor(next / MMA_COSTS.typeForMePer); // 1,2,3...
+  const refType = "mma_type_for_me";
+  const refId = `t4m:${passId}:b:${bucket}`;
+
+  const already = await megaHasCreditRef({ refType, refId });
+  if (already) return { charged: false, already: true, successCount: next };
+
+  // should succeed because we did preflight, but keep safe
+  await ensureEnoughCredits(passId, MMA_COSTS.typeForMeCharge);
+
+  await megaAdjustCredits({
+    passId,
+    delta: -MMA_COSTS.typeForMeCharge,
+    reason: "mma_type_for_me",
+    source: "mma",
+    refType,
+    refId,
+    grantedAt: nowIso(),
+  });
+
+  return { charged: true, bucket, successCount: next };
+}
+
 async function ensureCustomerRow(_supabase, passId, { shopifyCustomerId, userId, email }) {
   const out = await megaEnsureCustomer({
     passId,
@@ -1340,6 +1555,9 @@ async function runStillCreatePipeline({ supabase, generationId, passId, vars, pr
   if (!cfg.enabled) throw new Error("MMA_DISABLED");
 
   let working = vars;
+    const chargeCost = MMA_COSTS.still;
+  await chargeGeneration({ passId, generationId, cost: chargeCost, reason: "mma_image" });
+
   const ctx = await getMmaCtxConfig(supabase);
 
   let chatter = null;
@@ -1519,6 +1737,12 @@ async function runStillCreatePipeline({ supabase, generationId, passId, vars, pr
       .eq("mg_generation_id", generationId)
       .eq("mg_record_type", "generation");
 
+        try {
+      await refundOnFailure({ supabase, passId, generationId, cost: MMA_COSTS.still, err });
+    } catch (e) {
+      console.warn("[mma] refund failed (still create)", e?.message || e);
+    }
+
     emitStatus(generationId, "error");
     sendDone(generationId, toUserStatus("error"));
   }
@@ -1532,8 +1756,11 @@ async function runStillTweakPipeline({ supabase, generationId, passId, parent, v
   if (!cfg.enabled) throw new Error("MMA_DISABLED");
 
   let working = vars;
-  const ctx = await getMmaCtxConfig(supabase);
 
+  // ✅ charge at pipeline start (refund on failure)
+  await chargeGeneration({ passId, generationId, cost: MMA_COSTS.still, reason: "mma_image" });
+
+  const ctx = await getMmaCtxConfig(supabase);
   let chatter = null;
 
   try {
@@ -1604,9 +1831,7 @@ async function runStillTweakPipeline({ supabase, generationId, passId, parent, v
       supabase,
       generationId,
       getVars: () => working,
-      setVars: (v) => {
-        working = v;
-      },
+      setVars: (v) => { working = v; },
       stage: "generating",
       intervalMs: 2600,
     });
@@ -1617,7 +1842,6 @@ async function runStillTweakPipeline({ supabase, generationId, passId, parent, v
       process.env.MMA_SEADREAM_ASPECT_RATIO ||
       "match_input_image";
 
-    // tweak always has parent image input, so match_input_image is safe
     const forcedInput = {
       prompt: usedPrompt,
       size: cfg?.seadream?.size || process.env.MMA_SEADREAM_SIZE || "2K",
@@ -1639,9 +1863,7 @@ async function runStillTweakPipeline({ supabase, generationId, passId, parent, v
         input: forcedInput,
       });
     } finally {
-      try {
-        chatter?.stop?.();
-      } catch {}
+      try { chatter?.stop?.(); } catch {}
       chatter = null;
     }
 
@@ -1673,9 +1895,7 @@ async function runStillTweakPipeline({ supabase, generationId, passId, parent, v
     emitStatus(generationId, "done");
     sendDone(generationId, toUserStatus("done"));
   } catch (err) {
-    try {
-      chatter?.stop?.();
-    } catch {}
+    try { chatter?.stop?.(); } catch {}
     chatter = null;
 
     console.error("[mma] still tweak pipeline error", err);
@@ -1690,10 +1910,18 @@ async function runStillTweakPipeline({ supabase, generationId, passId, parent, v
       .eq("mg_generation_id", generationId)
       .eq("mg_record_type", "generation");
 
+    // ✅ refund (idempotent; safety refund max 1/day)
+    try {
+      await refundOnFailure({ supabase, passId, generationId, cost: MMA_COSTS.still, err });
+    } catch (e) {
+      console.warn("[mma] refund failed (still tweak)", e?.message || e);
+    }
+
     emitStatus(generationId, "error");
     sendDone(generationId, toUserStatus("error"));
   }
 }
+
 
 // ============================================================================
 // VIDEO ANIMATE PIPELINE (Kling)
@@ -1704,6 +1932,20 @@ async function runVideoAnimatePipeline({ supabase, generationId, passId, parent,
 
   let working = vars;
   const ctx = await getMmaCtxConfig(supabase);
+
+  // detect suggestOnly + typeForMe EARLY (for charging/refund logic)
+  const inputs0 = (working?.inputs && typeof working.inputs === "object") ? working.inputs : {};
+  const suggestOnly = inputs0.suggest_only === true || inputs0.suggestOnly === true;
+  const typeForMe =
+    inputs0.type_for_me === true ||
+    inputs0.typeForMe === true ||
+    inputs0.use_suggestion === true ||
+    inputs0.useSuggestion === true;
+
+  // ✅ charge ONLY for real video generation (not suggestion-only)
+  if (!suggestOnly) {
+    await chargeGeneration({ passId, generationId, cost: MMA_COSTS.video, reason: "mma_video" });
+  }
 
   let chatter = null;
 
@@ -1719,7 +1961,6 @@ async function runVideoAnimatePipeline({ supabase, generationId, passId, parent,
 
     const startImage = pickKlingStartImage(working, parent);
     const endImage = pickKlingEndImage(working, parent);
-
     if (!startImage) throw new Error("MISSING_START_IMAGE_FOR_VIDEO");
 
     const motionBrief =
@@ -1733,10 +1974,6 @@ async function runVideoAnimatePipeline({ supabase, generationId, passId, parent,
       safeStr(working?.inputs?.movement_style, "") ||
       safeStr(working?.inputs?.movementStyle, "");
 
-    // If frontend wants suggestion-only, we can stop after we have a prompt.
-    const suggestOnly = working?.inputs?.suggest_only === true || working?.inputs?.suggestOnly === true;
-
-    // ✅ SAFETY: allow frontend to provide prompt override (skip GPT)
     const promptOverride = safeStr(
       working?.inputs?.prompt_override ||
         working?.inputs?.motion_prompt_override ||
@@ -1748,14 +1985,13 @@ async function runVideoAnimatePipeline({ supabase, generationId, passId, parent,
       (working?.inputs?.use_prompt_override === true || working?.inputs?.usePromptOverride === true) &&
       !!promptOverride;
 
-    // Always keep start/end images saved in vars for audit + consistent runs
+    // Always keep start/end images saved in vars
     working.inputs = { ...(working.inputs || {}), start_image_url: startImage };
     if (endImage) working.inputs.end_image_url = endImage;
 
     let finalMotionPrompt = "";
 
     if (usePromptOverride) {
-      // ✅ record that we skipped GPT
       await writeStep({
         supabase,
         generationId,
@@ -1773,7 +2009,6 @@ async function runVideoAnimatePipeline({ supabase, generationId, passId, parent,
           error: null,
         },
       });
-
       finalMotionPrompt = promptOverride;
     } else {
       const oneShotInput = {
@@ -1821,9 +2056,8 @@ async function runVideoAnimatePipeline({ supabase, generationId, passId, parent,
 
     working.prompts = { ...(working.prompts || {}), motion_prompt: finalMotionPrompt };
     await updateVars({ supabase, generationId, vars: working });
-    
 
-
+    // ✅ suggestion-only: save prompt, maybe count + charge per 10 successes, then return
     if (suggestOnly) {
       await supabase
         .from("mega_generations")
@@ -1835,6 +2069,15 @@ async function runVideoAnimatePipeline({ supabase, generationId, passId, parent,
         })
         .eq("mg_generation_id", generationId)
         .eq("mg_record_type", "generation");
+
+      // ✅ TYPE FOR ME meter: count success, charge 1 per 10 successes
+      if (typeForMe) {
+        try {
+          await commitTypeForMeSuccessAndMaybeCharge({ supabase, passId });
+        } catch (e) {
+          console.warn("[mma] type-for-me charge failed:", e?.message || e);
+        }
+      }
 
       emitStatus(generationId, "suggested");
       sendDone(generationId, toUserStatus("suggested"));
@@ -1848,9 +2091,7 @@ async function runVideoAnimatePipeline({ supabase, generationId, passId, parent,
       supabase,
       generationId,
       getVars: () => working,
-      setVars: (v) => {
-        working = v;
-      },
+      setVars: (v) => { working = v; },
       stage: "generating",
       intervalMs: 2600,
     });
@@ -1882,9 +2123,7 @@ async function runVideoAnimatePipeline({ supabase, generationId, passId, parent,
         negativePrompt: neg,
       });
     } finally {
-      try {
-        chatter?.stop?.();
-      } catch {}
+      try { chatter?.stop?.(); } catch {}
       chatter = null;
     }
 
@@ -1917,9 +2156,7 @@ async function runVideoAnimatePipeline({ supabase, generationId, passId, parent,
     emitStatus(generationId, "done");
     sendDone(generationId, toUserStatus("done"));
   } catch (err) {
-    try {
-      chatter?.stop?.();
-    } catch {}
+    try { chatter?.stop?.(); } catch {}
     chatter = null;
 
     console.error("[mma] video animate pipeline error", err);
@@ -1934,10 +2171,20 @@ async function runVideoAnimatePipeline({ supabase, generationId, passId, parent,
       .eq("mg_generation_id", generationId)
       .eq("mg_record_type", "generation");
 
+    // ✅ refund ONLY if this was a real paid generation (not suggestion-only)
+    if (!suggestOnly) {
+      try {
+        await refundOnFailure({ supabase, passId, generationId, cost: MMA_COSTS.video, err });
+      } catch (e) {
+        console.warn("[mma] refund failed (video animate)", e?.message || e);
+      }
+    }
+
     emitStatus(generationId, "error");
     sendDone(generationId, toUserStatus("error"));
   }
 }
+
 
 // ============================================================================
 // VIDEO TWEAK PIPELINE (Kling)
@@ -2157,6 +2404,9 @@ export async function handleMmaStillTweak({ parentGenerationId, body }) {
       email: body?.email,
     });
 
+  // ✅ fail fast: still tweak needs 1 credit available (actual charge happens in pipeline)
+  await ensureEnoughCredits(passId, MMA_COSTS.still);
+
   const generationId = newUuid();
 
   const { preferences } = await ensureCustomerRow(supabase, passId, {
@@ -2218,6 +2468,7 @@ export async function handleMmaStillTweak({ parentGenerationId, body }) {
   return { generation_id: generationId, status: "queued", sse_url: `/mma/stream/${generationId}` };
 }
 
+
 export async function handleMmaVideoTweak({ parentGenerationId, body }) {
   const supabase = getSupabaseAdmin();
   if (!supabase) throw new Error("SUPABASE_NOT_CONFIGURED");
@@ -2234,6 +2485,7 @@ export async function handleMmaVideoTweak({ parentGenerationId, body }) {
       userId: body?.user_id,
       email: body?.email,
     });
+  await ensureEnoughCredits(passId, MMA_COSTS.video);
 
   const generationId = newUuid();
 
@@ -2319,6 +2571,25 @@ export async function handleMmaCreate({ mode, body }) {
 
   const parentId = body?.parent_generation_id || body?.parentGenerationId || body?.generation_id || null;
 
+  // ----------------------------
+  // CREDITS PREFLIGHT (fail fast)
+  // ----------------------------
+  const inputs = (body?.inputs && typeof body.inputs === "object") ? body.inputs : {};
+  const suggestOnly = inputs.suggest_only === true || inputs.suggestOnly === true;
+  const typeForMe =
+    inputs.type_for_me === true ||
+    inputs.typeForMe === true ||
+    inputs.use_suggestion === true ||
+    inputs.useSuggestion === true;
+
+  if (mode === "video" && suggestOnly && typeForMe) {
+    // 1 credit per 10 successful suggestions (blocks on #10 if balance=0)
+    await preflightTypeForMe({ supabase, passId });
+  } else {
+    // Real generation: still=1, video=5 (actual charge happens in pipeline)
+    await ensureEnoughCredits(passId, mode === "video" ? MMA_COSTS.video : MMA_COSTS.still);
+  }
+
   const generationId = newUuid();
 
   const { preferences } = await ensureCustomerRow(supabase, passId, {
@@ -2378,7 +2649,6 @@ export async function handleMmaCreate({ mode, body }) {
   } else if (mode === "video") {
     vars.meta = { ...(vars.meta || {}), flow: "video_animate", parent_generation_id: parentId || null };
 
-    // if animating from a still, store parent output url for audit + start_image
     if (parent?.mg_output_url) {
       vars.inputs = { ...(vars.inputs || {}), parent_output_url: parent.mg_output_url };
     }
@@ -2402,6 +2672,7 @@ export async function handleMmaCreate({ mode, body }) {
 
   return { generation_id: generationId, status: "queued", sse_url: `/mma/stream/${generationId}` };
 }
+
 
 export async function handleMmaEvent(body) {
   const supabase = getSupabaseAdmin();
