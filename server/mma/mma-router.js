@@ -13,11 +13,12 @@ import {
   handleMmaVideoTweak,
   listErrors,
   listSteps,
+  refreshFromReplicate,
   registerSseClient,
   toUserStatus,
 } from "./mma-controller.js";
 import { getSupabaseAdmin } from "../../supabase.js";
-import { resolvePassId as megaResolvePassId } from "../../mega-db.js";
+import { megaEnsureCustomer, resolvePassId as megaResolvePassId } from "../../mega-db.js";
 
 const router = express.Router();
 
@@ -118,6 +119,26 @@ router.post("/events", async (req, res) => {
   } catch (err) {
     console.error("[mma] events error", err);
     res.status(500).json({ error: "MMA_EVENT_FAILED", message: err?.message });
+  }
+});
+
+router.post("/generations/:generation_id/refresh", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const passId = megaResolvePassId(req, body);
+    res.set("X-Mina-Pass-Id", passId);
+
+    await megaEnsureCustomer({ passId });
+
+    const out = await refreshFromReplicate({
+      generationId: req.params.generation_id,
+      passId,
+    });
+
+    res.json(out);
+  } catch (err) {
+    console.error("[mma] refresh error", err);
+    res.status(500).json({ ok: false, error: "REFRESH_FAILED", message: err?.message });
   }
 });
 
