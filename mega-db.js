@@ -263,7 +263,59 @@ export async function megaAdjustCredits({
   // Ensure customer exists
   await megaEnsureCustomer({ passId: pid });
 
-  // Read current
+  // Normalize ref (IMPORTANT for idempotency)
+  const rt = refType ? safeString(refType, "") : "";
+  const rid = refId ? safeString(refId, "") : "";
+  const hasRef = Boolean(rt && rid);
+
+  // If caller gave a ref, we make the operation idempotent:
+  // 1) try to INSERT the credit_transaction first
+  // 2) if it's a duplicate ref, RETURN without changing balance
+  const txId = `credit_transaction:${crypto.randomUUID()}`;
+
+  if (hasRef) {
+    const { error: txErr } = await supabase.from("mega_generations").insert({
+      mg_id: txId,
+      mg_record_type: "credit_transaction",
+      mg_pass_id: pid,
+      mg_delta: Math.trunc(d),
+      mg_reason: safeString(reason, null),
+      mg_source: safeString(source, null),
+      mg_ref_type: rt,
+      mg_ref_id: rid,
+      mg_status: "pending",
+      mg_meta: {},
+      mg_payload: null,
+      mg_event_at: eventAt,
+      mg_created_at: ts,
+      mg_updated_at: ts,
+    });
+
+    // Postgres duplicate key violation
+    if (txErr) {
+      const code = String(txErr.code || "");
+      const msg = String(txErr.message || "");
+      const dup =
+        code === "23505" ||
+        msg.toLowerCase().includes("duplicate") ||
+        msg.toLowerCase().includes("unique");
+
+      if (dup) {
+        // Already applied earlier → DO NOT change balance again.
+        const cur = await megaGetCredits(pid);
+        return {
+          creditsBefore: cur.credits,
+          creditsAfter: cur.credits,
+          expiresAt: cur.expiresAt ?? null,
+          alreadyApplied: true,
+        };
+      }
+
+      throw txErr;
+    }
+  }
+
+  // Read current AFTER the tx reservation (prevents double-debit)
   const { data: row, error: readErr } = await supabase
     .from("mega_customers")
     .select("mg_credits, mg_expires_at")
@@ -296,34 +348,68 @@ export async function megaAdjustCredits({
     })
     .eq("mg_pass_id", pid);
 
-  if (upErr) throw upErr;
+  if (upErr) {
+    // If we inserted a pending tx row, mark it failed (best-effort)
+    if (hasRef) {
+      try {
+        await supabase
+          .from("mega_generations")
+          .update({
+            mg_status: "error",
+            mg_error: safeString(upErr.message || upErr, "CREDITS_UPDATE_FAILED"),
+            mg_updated_at: nowIso(),
+          })
+          .eq("mg_id", txId);
+      } catch {}
+    }
+    throw upErr;
+  }
 
-  // Ledger row
-  const { error: insErr } = await supabase.from("mega_generations").insert({
-    mg_id: `credit_transaction:${crypto.randomUUID()}`,
-    mg_record_type: "credit_transaction",
-    mg_pass_id: pid,
-    mg_delta: Math.trunc(d),
-    mg_reason: safeString(reason, null),
-    mg_source: safeString(source, null),
-    mg_ref_type: refType ? safeString(refType, null) : null,
-    mg_ref_id: refId ? safeString(refId, null) : null,
-    mg_status: "succeeded",
-    mg_meta: {
-      credits_before: before,
-      credits_after: after,
-      expires_at: nextExpiry,
-    },
-    mg_payload: null,
-    mg_event_at: eventAt,
-    mg_created_at: ts,
-    mg_updated_at: ts,
-  });
+  // If we reserved a tx row, finalize it with correct meta
+  if (hasRef) {
+    const { error: finErr } = await supabase
+      .from("mega_generations")
+      .update({
+        mg_status: "succeeded",
+        mg_meta: {
+          credits_before: before,
+          credits_after: after,
+          expires_at: nextExpiry,
+        },
+        mg_updated_at: nowIso(),
+      })
+      .eq("mg_id", txId);
 
-  if (insErr) throw insErr;
+    if (finErr) throw finErr;
+  } else {
+    // No ref: still write a ledger row (not idempotent)
+    const { error: insErr } = await supabase.from("mega_generations").insert({
+      mg_id: txId,
+      mg_record_type: "credit_transaction",
+      mg_pass_id: pid,
+      mg_delta: Math.trunc(d),
+      mg_reason: safeString(reason, null),
+      mg_source: safeString(source, null),
+      mg_ref_type: null,
+      mg_ref_id: null,
+      mg_status: "succeeded",
+      mg_meta: {
+        credits_before: before,
+        credits_after: after,
+        expires_at: nextExpiry,
+      },
+      mg_payload: null,
+      mg_event_at: eventAt,
+      mg_created_at: ts,
+      mg_updated_at: ts,
+    });
 
-  return { creditsBefore: before, creditsAfter: after, expiresAt: nextExpiry };
+    if (insErr) throw insErr;
+  }
+
+  return { creditsBefore: before, creditsAfter: after, expiresAt: nextExpiry, alreadyApplied: false };
 }
+
 
 // ---------------------------
 // Session writer (mega_generations)
