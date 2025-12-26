@@ -27,6 +27,7 @@ import {
 
 import { addSseClient, sendDone, sendScanLine, sendStatus } from "./mma-sse.js";
 import { getMmaConfig } from "./mma-config.js";
+import { replicatePredictWithTimeout } from "./replicate-poll.js";
 
 // ============================================================================
 // USER-FACING TEXT (EDIT THESE)
@@ -672,8 +673,9 @@ async function gptMotionOneShotTweak({ cfg, ctx, input, labeledImages }) {
 }
 
 // ============================================================================
-// Replicate helpers (Seedream + Kling)
+// Replicate helpers (Seedream + Kling) — HARD TIMEOUT + RECOVERABLE prediction_id
 // ============================================================================
+
 function pickFirstUrl(output) {
   const seen = new Set();
   const isUrl = (s) => typeof s === "string" && /^https?:\/\//i.test(s);
@@ -694,9 +696,23 @@ function pickFirstUrl(output) {
       if (seen.has(v)) return "";
       seen.add(v);
 
-      const keys = ["url", "output", "outputs", "video", "video_url", "videoUrl", "mp4", "file", "files", "result", "results", "data"];
+      const keys = [
+        "url",
+        "output",
+        "outputs",
+        "video",
+        "video_url",
+        "videoUrl",
+        "mp4",
+        "file",
+        "files",
+        "result",
+        "results",
+        "data",
+      ];
+
       for (const k of keys) {
-        if (v && Object.prototype.hasOwnProperty.call(v, k)) {
+        if (Object.prototype.hasOwnProperty.call(v, k)) {
           const u = walk(v[k]);
           if (u) return u;
         }
@@ -736,7 +752,6 @@ function buildSeedreamImageInputs(vars) {
     .filter(Boolean)
     .slice(0, 4);
 
-  // spec order: product, logo, inspirations, style hero
   return []
     .concat(product ? [product] : [])
     .concat(logo ? [logo] : [])
@@ -745,6 +760,14 @@ function buildSeedreamImageInputs(vars) {
     .filter(Boolean)
     .slice(0, 10);
 }
+
+// ---- HARD TIMEOUT settings (4 minutes default) ----
+const REPLICATE_MAX_MS = Number(process.env.MMA_REPLICATE_MAX_MS || 240000) || 240000;
+const REPLICATE_POLL_MS = Number(process.env.MMA_REPLICATE_POLL_MS || 2500) || 2500;
+const REPLICATE_CALL_TIMEOUT_MS = Number(process.env.MMA_REPLICATE_CALL_TIMEOUT_MS || 15000) || 15000;
+// Default FALSE: if timeout happens, do NOT cancel, so you can recover later.
+const REPLICATE_CANCEL_ON_TIMEOUT =
+  String(process.env.MMA_REPLICATE_CANCEL_ON_TIMEOUT || "false").toLowerCase() === "true";
 
 async function runSeedream({ prompt, aspectRatio, imageInputs = [], size, enhancePrompt, input: forcedInput }) {
   const replicate = getReplicate();
@@ -767,6 +790,7 @@ async function runSeedream({ prompt, aspectRatio, imageInputs = [], size, enhanc
     "";
 
   const finalPrompt = neg ? `${prompt}\n\nAvoid: ${neg}` : prompt;
+
   const cleanedInputs = safeArray(imageInputs).map(asHttpUrl).filter(Boolean).slice(0, 10);
 
   const enhance_prompt =
@@ -796,16 +820,33 @@ async function runSeedream({ prompt, aspectRatio, imageInputs = [], size, enhanc
   if (!input.image_input && cleanedInputs.length) input.image_input = cleanedInputs;
 
   const t0 = Date.now();
-  const out = await replicate.run(version, { input });
+
+  // ✅ Use predictions + poll (prevents “never stops”)
+  const pred = await replicatePredictWithTimeout({
+    replicate,
+    version,
+    input,
+    timeoutMs: REPLICATE_MAX_MS,
+    pollMs: REPLICATE_POLL_MS,
+    callTimeoutMs: REPLICATE_CALL_TIMEOUT_MS,
+    cancelOnTimeout: REPLICATE_CANCEL_ON_TIMEOUT,
+  });
+
+  const prediction = pred.prediction || {};
+  const out = prediction.output;
 
   return {
     input,
-    out,
+    out, // what pickFirstUrl reads
+    prediction_id: pred.predictionId,
+    prediction_status: prediction.status || null,
+    timed_out: !!pred.timedOut,
     timing: {
       started_at: new Date(t0).toISOString(),
       ended_at: nowIso(),
       duration_ms: Date.now() - t0,
     },
+    provider: { prediction },
   };
 }
 
@@ -845,7 +886,8 @@ async function runKling({ prompt, startImage, endImage, duration, mode, negative
     cfg?.kling?.model ||
     "kwaivgi/kling-v2.1";
 
-  const defaultDuration = Number(duration ?? cfg?.kling?.duration ?? process.env.MMA_KLING_DURATION ?? 5) || 5;
+  const defaultDuration =
+    Number(duration ?? cfg?.kling?.duration ?? process.env.MMA_KLING_DURATION ?? 5) || 5;
 
   const envNeg =
     process.env.NEGATIVE_PROMPT_KLING ||
@@ -877,16 +919,33 @@ async function runKling({ prompt, startImage, endImage, duration, mode, negative
   if (hasEnd && !input.end_image) input.end_image = asHttpUrl(endImage);
 
   const t0 = Date.now();
-  const out = await replicate.run(version, { input });
+
+  // ✅ Use predictions + poll (prevents “never stops”)
+  const pred = await replicatePredictWithTimeout({
+    replicate,
+    version,
+    input,
+    timeoutMs: REPLICATE_MAX_MS,
+    pollMs: REPLICATE_POLL_MS,
+    callTimeoutMs: REPLICATE_CALL_TIMEOUT_MS,
+    cancelOnTimeout: REPLICATE_CANCEL_ON_TIMEOUT,
+  });
+
+  const prediction = pred.prediction || {};
+  const out = prediction.output;
 
   return {
     input,
     out,
+    prediction_id: pred.predictionId,
+    prediction_status: prediction.status || null,
+    timed_out: !!pred.timedOut,
     timing: {
       started_at: new Date(t0).toISOString(),
       ended_at: nowIso(),
       duration_ms: Date.now() - t0,
     },
+    provider: { prediction },
   };
 }
 
@@ -1418,6 +1477,9 @@ async function runStillCreatePipeline({ supabase, generationId, passId, vars, pr
         size: cfg?.seadream?.size,
         enhancePrompt: cfg?.seadream?.enhancePrompt,
       });
+      // ✅ store prediction id for recovery later
+      working.outputs = { ...(working.outputs || {}), seedream_prediction_id: seedRes.prediction_id || null };
+      await updateVars({ supabase, generationId, vars: working });
     } finally {
       try {
         chatter?.stop?.();
@@ -1855,6 +1917,9 @@ async function runVideoAnimatePipeline({ supabase, generationId, passId, parent,
         mode,
         negativePrompt: neg,
       });
+      // ✅ store prediction id for recovery later
+      working.outputs = { ...(working.outputs || {}), kling_prediction_id: klingRes.prediction_id || null };
+      await updateVars({ supabase, generationId, vars: working });
     } finally {
       try {
         chatter?.stop?.();
@@ -2466,6 +2531,78 @@ export async function handleMmaEvent(body) {
   }
 
   return { event_id: eventId, status: "ok" };
+}
+
+export async function refreshFromReplicate({ generationId, passId }) {
+  const supabase = getSupabaseAdmin();
+  if (!supabase) throw new Error("SUPABASE_NOT_CONFIGURED");
+
+  const { data, error } = await supabase
+    .from("mega_generations")
+    .select("mg_pass_id, mg_mma_mode, mg_output_url, mg_prompt, mg_mma_vars")
+    .eq("mg_generation_id", generationId)
+    .eq("mg_record_type", "generation")
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!data) return { ok: false, error: "NOT_FOUND" };
+
+  // security: only same passId can refresh
+  if (passId && data.mg_pass_id && String(passId) !== String(data.mg_pass_id)) {
+    return { ok: false, error: "FORBIDDEN" };
+  }
+
+  if (data.mg_output_url) {
+    return { ok: true, refreshed: false, alreadyDone: true, url: data.mg_output_url };
+  }
+
+  const vars = data.mg_mma_vars && typeof data.mg_mma_vars === "object" ? data.mg_mma_vars : {};
+  const mode = String(data.mg_mma_mode || "");
+  const outputs = vars.outputs && typeof vars.outputs === "object" ? vars.outputs : {};
+
+  const predictionId =
+    mode === "video"
+      ? outputs.kling_prediction_id || outputs.klingPredictionId || ""
+      : outputs.seedream_prediction_id || outputs.seedreamPredictionId || "";
+
+  if (!predictionId) {
+    return { ok: false, error: "NO_PREDICTION_ID" };
+  }
+
+  const replicate = getReplicate();
+  const pred = await replicate.predictions.get(String(predictionId));
+  const providerStatus = pred?.status || null;
+
+  const url = pickFirstUrl(pred?.output);
+  if (!url) {
+    return { ok: true, refreshed: false, provider_status: providerStatus };
+  }
+
+  // store permanent + finalize
+  const remoteUrl = await storeRemoteToR2Public(
+    url,
+    mode === "video" ? `mma/video/${generationId}` : `mma/still/${generationId}`
+  );
+
+  // update vars + final row
+  const nextVars = { ...vars, mg_output_url: remoteUrl };
+  nextVars.outputs = { ...(nextVars.outputs || {}) };
+  if (mode === "video") nextVars.outputs.kling_video_url = remoteUrl;
+  else nextVars.outputs.seedream_image_url = remoteUrl;
+
+  await supabase
+    .from("mega_generations")
+    .update({
+      mg_output_url: remoteUrl,
+      mg_status: "done",
+      mg_mma_status: "done",
+      mg_mma_vars: nextVars,
+      mg_updated_at: nowIso(),
+    })
+    .eq("mg_generation_id", generationId)
+    .eq("mg_record_type", "generation");
+
+  return { ok: true, refreshed: true, provider_status: providerStatus, url: remoteUrl };
 }
 
 // ============================================================================
