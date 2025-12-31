@@ -1174,11 +1174,23 @@ async function storeRemoteToR2Public(url, keyPrefix) {
 // CREDITS (controller-owned)
 // ============================================================================
 const MMA_COSTS = {
-  still: 1,
+  still_main: 1,
+  still_niche: 2,
   video: 5,
   typeForMePer: 10,
   typeForMeCharge: 1,
 };
+
+// ✅ Any still generation: niche lane costs 2 credits, otherwise 1.
+// Accepts either full vars OR a plain inputs object.
+function getStillCost(varsOrInputs) {
+  const v =
+    varsOrInputs && typeof varsOrInputs === "object" && varsOrInputs.inputs
+      ? varsOrInputs
+      : { inputs: varsOrInputs && typeof varsOrInputs === "object" ? varsOrInputs : {} };
+
+  return resolveStillLane(v) === "niche" ? MMA_COSTS.still_niche : MMA_COSTS.still_main;
+}
 
 function utcDayKey() {
   return nowIso().slice(0, 10);
@@ -1482,7 +1494,14 @@ async function runStillCreatePipeline({ supabase, generationId, passId, vars, pr
   if (!cfg.enabled) throw new Error("MMA_DISABLED");
 
   let working = vars;
-  await chargeGeneration({ passId, generationId, cost: MMA_COSTS.still, reason: "mma_still" });
+
+  const stillCost = getStillCost(working); // ✅ niche => 2, main => 1
+  await chargeGeneration({
+    passId,
+    generationId,
+    cost: stillCost,
+    reason: stillCost === MMA_COSTS.still_niche ? "mma_still_niche" : "mma_still",
+  });
 
   const ctx = await getMmaCtxConfig(supabase);
   let chatter = null;
@@ -1711,7 +1730,7 @@ async function runStillCreatePipeline({ supabase, generationId, passId, vars, pr
       .eq("mg_record_type", "generation");
 
     try {
-      await refundOnFailure({ supabase, passId, generationId, cost: MMA_COSTS.still, err });
+      await refundOnFailure({ supabase, passId, generationId, cost: stillCost, err });
     } catch (e) {
       console.warn("[mma] refund failed (still create)", e?.message || e);
     }
@@ -1730,7 +1749,13 @@ async function runStillTweakPipeline({ supabase, generationId, passId, parent, v
 
   let working = vars;
 
-  await chargeGeneration({ passId, generationId, cost: MMA_COSTS.still, reason: "mma_still" });
+  const stillCost = getStillCost(working); // ✅ niche => 2, main => 1
+  await chargeGeneration({
+    passId,
+    generationId,
+    cost: stillCost,
+    reason: stillCost === MMA_COSTS.still_niche ? "mma_still_niche" : "mma_still",
+  });
 
   const ctx = await getMmaCtxConfig(supabase);
   let chatter = null;
@@ -1922,7 +1947,7 @@ async function runStillTweakPipeline({ supabase, generationId, passId, parent, v
       .eq("mg_record_type", "generation");
 
     try {
-      await refundOnFailure({ supabase, passId, generationId, cost: MMA_COSTS.still, err });
+      await refundOnFailure({ supabase, passId, generationId, cost: stillCost, err });
     } catch (e) {
       console.warn("[mma] refund failed (still tweak)", e?.message || e);
     }
@@ -2429,7 +2454,8 @@ export async function handleMmaStillTweak({ parentGenerationId, body }) {
       email: body?.email,
     });
 
-  await ensureEnoughCredits(passId, MMA_COSTS.still);
+  const stillCost = getStillCost(body?.inputs || {});
+  await ensureEnoughCredits(passId, stillCost);
 
   const generationId = newUuid();
 
@@ -2599,7 +2625,12 @@ export async function handleMmaCreate({ mode, body }) {
   if (mode === "video" && suggestOnly && typeForMe) {
     await preflightTypeForMe({ supabase, passId });
   } else {
-    await ensureEnoughCredits(passId, mode === "video" ? MMA_COSTS.video : MMA_COSTS.still);
+    if (mode === "video") {
+      await ensureEnoughCredits(passId, MMA_COSTS.video);
+    } else {
+      const stillCost = getStillCost(body?.inputs || {});
+      await ensureEnoughCredits(passId, stillCost);
+    }
   }
 
   const generationId = newUuid();
