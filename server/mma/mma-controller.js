@@ -2847,20 +2847,34 @@ export async function fetchGeneration(generationId) {
 
   const internal = data.mg_mma_status || data.mg_status || "queued";
 
+  const vars = data.mg_mma_vars && typeof data.mg_mma_vars === "object" ? data.mg_mma_vars : {};
+  const vOut = vars.outputs && typeof vars.outputs === "object" ? vars.outputs : {};
+  const meta = vars.meta && typeof vars.meta === "object" ? vars.meta : {};
+
+  const stillEngine =
+    safeStr(meta.still_engine, "") ||
+    (vOut.nanobanana_image_url || vOut.nanobanana_prediction_id ? "nanobanana" : "seedream");
+
+  const stillUrl = data.mg_mma_mode === "still" ? data.mg_output_url : null;
+
   return {
     generation_id: data.mg_generation_id,
-
-    // ✅ friendly text for UI
     status: toUserStatus(internal),
-
-    // ✅ stable machine state for frontend logic
     state: internal,
 
-    mma_vars: data.mg_mma_vars || {},
+    mma_vars: vars,
+
+    // ✅ tell frontend what actually happened
+    still_engine: data.mg_mma_mode === "still" ? stillEngine : null,
+
     outputs: {
-      seedream_image_url: data.mg_mma_mode === "still" ? data.mg_output_url : null,
+      seedream_image_url:
+        data.mg_mma_mode === "still" && stillEngine === "seedream" ? stillUrl : vOut.seedream_image_url || null,
+      nanobanana_image_url:
+        data.mg_mma_mode === "still" && stillEngine === "nanobanana" ? stillUrl : vOut.nanobanana_image_url || null,
       kling_video_url: data.mg_mma_mode === "video" ? data.mg_output_url : null,
     },
+
     prompt: data.mg_prompt || null,
     error: data.mg_error || null,
   };
