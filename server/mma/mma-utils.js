@@ -199,6 +199,18 @@ export function makeInitialVars({
       // ✅ canonical fields your controller reads
       brief,
 
+      // ✅ keep lane selection (this is what resolveStillLane() reads)
+      still_lane: safeString(
+        inputs.still_lane ||
+          inputs.stillLane ||
+          inputs.model_lane ||
+          inputs.modelLane ||
+          inputs.lane ||
+          inputs.create_lane ||
+          inputs.createLane,
+        ""
+      ),
+
       motion_user_brief: motionUserBrief,
       selected_movement_style: selectedMovementStyle,
 
@@ -209,6 +221,16 @@ export function makeInitialVars({
       // suggestion controls (video “Type for me”)
       type_for_me: !!typeForMe,
       suggest_only: !!suggestOnly,
+
+      // ✅ keep prompt override controls (your controller reads these)
+      use_prompt_override: !!(inputs.use_prompt_override ?? inputs.usePromptOverride ?? false),
+      prompt_override: safeString(
+        inputs.prompt_override ||
+          inputs.motion_prompt_override ||
+          inputs.motionPromptOverride ||
+          "",
+        ""
+      ),
 
       // keep old fields too
       userBrief: safeString(inputs.userBrief, ""),
