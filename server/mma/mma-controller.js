@@ -2855,23 +2855,19 @@ export async function fetchGeneration(generationId) {
     safeStr(meta.still_engine, "") ||
     (vOut.nanobanana_image_url || vOut.nanobanana_prediction_id ? "nanobanana" : "seedream");
 
-  const stillUrl = data.mg_mma_mode === "still" ? data.mg_output_url : null;
-
   return {
     generation_id: data.mg_generation_id,
     status: toUserStatus(internal),
     state: internal,
 
     mma_vars: vars,
-
-    // ✅ tell frontend what actually happened
     still_engine: data.mg_mma_mode === "still" ? stillEngine : null,
 
     outputs: {
       seedream_image_url:
-        data.mg_mma_mode === "still" && stillEngine === "seedream" ? stillUrl : vOut.seedream_image_url || null,
+        data.mg_mma_mode === "still" && stillEngine === "seedream" ? data.mg_output_url : null,
       nanobanana_image_url:
-        data.mg_mma_mode === "still" && stillEngine === "nanobanana" ? stillUrl : vOut.nanobanana_image_url || null,
+        data.mg_mma_mode === "still" && stillEngine === "nanobanana" ? data.mg_output_url : null,
       kling_video_url: data.mg_mma_mode === "video" ? data.mg_output_url : null,
     },
 
