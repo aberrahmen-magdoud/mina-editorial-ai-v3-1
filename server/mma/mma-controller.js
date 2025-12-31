@@ -891,7 +891,8 @@ async function runNanoBanana({
     replicate,
     version,
     input,
-    timeoutMs: REPLICATE_MAX_MS,
+    // ✅ Nano Banana can take 7–10 minutes. Default hard timeout is 15 min unless overridden.
+    timeoutMs: REPLICATE_MAX_MS_NANOBANANA,
     pollMs: REPLICATE_POLL_MS,
     callTimeoutMs: REPLICATE_CALL_TIMEOUT_MS,
     cancelOnTimeout: REPLICATE_CANCEL_ON_TIMEOUT,
@@ -917,6 +918,14 @@ async function runNanoBanana({
 
 // ---- HARD TIMEOUT settings (4 minutes default) ----
 const REPLICATE_MAX_MS = Number(process.env.MMA_REPLICATE_MAX_MS || 240000) || 240000;
+
+// ✅ Nano Banana can be slow. Give it its own timeout.
+// Set on Render if you want:
+// MMA_REPLICATE_MAX_MS_NANOBANANA=900000   (15 min)
+// MMA_REPLICATE_MAX_MS_NANOBANANA=720000   (12 min)
+const REPLICATE_MAX_MS_NANOBANANA =
+  Number(process.env.MMA_REPLICATE_MAX_MS_NANOBANANA || 900000) || 900000;
+
 const REPLICATE_POLL_MS = Number(process.env.MMA_REPLICATE_POLL_MS || 2500) || 2500;
 const REPLICATE_CALL_TIMEOUT_MS = Number(process.env.MMA_REPLICATE_CALL_TIMEOUT_MS || 15000) || 15000;
 // Default FALSE: if timeout happens, do NOT cancel, so you can recover later.
@@ -1181,6 +1190,68 @@ const MMA_COSTS = {
   typeForMeCharge: 1,
 };
 
+function resolveStillLaneFromInputs(inputsLike) {
+  const inputs = inputsLike && typeof inputsLike === "object" ? inputsLike : {};
+  const raw = safeStr(
+    inputs.still_lane ||
+      inputs.stillLane ||
+      inputs.model_lane ||
+      inputs.modelLane ||
+      inputs.lane ||
+      inputs.create_lane ||
+      inputs.createLane,
+    "main"
+  ).toLowerCase();
+  return raw === "niche" ? "niche" : "main";
+}
+
+function stillCostForLane(lane) {
+  return lane === "niche" ? MMA_COSTS.still_niche : MMA_COSTS.still_main;
+}
+
+function buildInsufficientCreditsDetails({ balance, needed, lane }) {
+  const bal = Number(balance || 0);
+  const need = Number(needed || 0);
+  const requestedLane = lane === "niche" ? "niche" : lane === "main" ? "main" : null;
+
+  const canSwitchToMain = requestedLane === "niche" && bal >= MMA_COSTS.still_main;
+
+  // ✅ clean UX line (what Mina says)
+  // Keep it short + human.
+  let userMessage = "";
+  if (requestedLane === "niche") {
+    // Example:
+    // “you’ve got 1 matcha left. this mode needs 2. top up or switch to main?”
+    userMessage =
+      `you've got ${bal} matcha left. this mode needs ${need}. ` +
+      (canSwitchToMain ? "top up or switch to main?" : "top up to keep going.");
+  } else {
+    userMessage = `you've got ${bal} matcha left. you need ${need}. top up to keep going.`;
+  }
+
+  const actions = [{ id: "buy_matcha", label: "Buy matcha", enabled: true }];
+
+  if (requestedLane === "niche") {
+    actions.push({
+      id: "switch_to_main",
+      label: `Switch to main (${MMA_COSTS.still_main} matcha)`,
+      enabled: canSwitchToMain,
+      // frontend can re-call the same endpoint with this patch applied
+      patch: { inputs: { still_lane: "main" } },
+    });
+  }
+
+  return {
+    userMessage,
+    balance: bal,
+    needed: need,
+    lane: requestedLane,
+    costs: { still_main: MMA_COSTS.still_main, still_niche: MMA_COSTS.still_niche, video: MMA_COSTS.video },
+    canSwitchToMain,
+    actions,
+  };
+}
+
 // ✅ Any still generation: niche lane costs 2 credits, otherwise 1.
 // Accepts either full vars OR a plain inputs object.
 function getStillCost(varsOrInputs) {
@@ -1189,7 +1260,7 @@ function getStillCost(varsOrInputs) {
       ? varsOrInputs
       : { inputs: varsOrInputs && typeof varsOrInputs === "object" ? varsOrInputs : {} };
 
-  return resolveStillLane(v) === "niche" ? MMA_COSTS.still_niche : MMA_COSTS.still_main;
+  return stillCostForLane(resolveStillLane(v));
 }
 
 function utcDayKey() {
@@ -1204,14 +1275,24 @@ function makeHttpError(statusCode, code, extra = {}) {
   return err;
 }
 
-async function ensureEnoughCredits(passId, needed) {
+async function ensureEnoughCredits(passId, needed, opts = {}) {
   const { credits } = await megaGetCredits(passId);
   const bal = Number(credits || 0);
-  if (bal < Number(needed || 0)) {
+  const need = Number(needed || 0);
+
+  if (bal < need) {
+    const lane = safeStr(opts?.lane, "");
+    const details = buildInsufficientCreditsDetails({
+      balance: bal,
+      needed: need,
+      lane,
+    });
+
     throw makeHttpError(402, "INSUFFICIENT_CREDITS", {
       passId,
       balance: bal,
-      needed: Number(needed || 0),
+      needed: need,
+      details,
     });
   }
   return { balance: bal };
@@ -1258,7 +1339,7 @@ function isSafetyBlockError(err) {
   );
 }
 
-async function chargeGeneration({ passId, generationId, cost, reason }) {
+async function chargeGeneration({ passId, generationId, cost, reason, lane }) {
   const c = Number(cost || 0);
   if (c <= 0) return { charged: false, cost: 0 };
 
@@ -1268,7 +1349,7 @@ async function chargeGeneration({ passId, generationId, cost, reason }) {
   const already = await megaHasCreditRef({ refType, refId });
   if (already) return { charged: true, already: true, cost: c };
 
-  await ensureEnoughCredits(passId, c);
+  await ensureEnoughCredits(passId, c, { lane });
 
   await megaAdjustCredits({
     passId,
@@ -1495,12 +1576,14 @@ async function runStillCreatePipeline({ supabase, generationId, passId, vars, pr
 
   let working = vars;
 
-  const stillCost = getStillCost(working); // ✅ niche => 2, main => 1
+  const stillLane = resolveStillLane(working);
+  const stillCost = stillCostForLane(stillLane); // ✅ niche => 2, main => 1
   await chargeGeneration({
     passId,
     generationId,
     cost: stillCost,
-    reason: stillCost === MMA_COSTS.still_niche ? "mma_still_niche" : "mma_still",
+    reason: stillLane === "niche" ? "mma_still_niche" : "mma_still",
+    lane: stillLane,
   });
 
   const ctx = await getMmaCtxConfig(supabase);
@@ -1749,12 +1832,14 @@ async function runStillTweakPipeline({ supabase, generationId, passId, parent, v
 
   let working = vars;
 
-  const stillCost = getStillCost(working); // ✅ niche => 2, main => 1
+  const stillLane = resolveStillLane(working);
+  const stillCost = stillCostForLane(stillLane); // ✅ niche => 2, main => 1
   await chargeGeneration({
     passId,
     generationId,
     cost: stillCost,
-    reason: stillCost === MMA_COSTS.still_niche ? "mma_still_niche" : "mma_still",
+    reason: stillLane === "niche" ? "mma_still_niche" : "mma_still",
+    lane: stillLane,
   });
 
   const ctx = await getMmaCtxConfig(supabase);
@@ -1976,7 +2061,7 @@ async function runVideoAnimatePipeline({ supabase, generationId, passId, parent,
     inputs0.useSuggestion === true;
 
   if (!suggestOnly) {
-    await chargeGeneration({ passId, generationId, cost: MMA_COSTS.video, reason: "mma_video" });
+    await chargeGeneration({ passId, generationId, cost: MMA_COSTS.video, reason: "mma_video", lane: "video" });
   }
 
   let chatter = null;
@@ -2238,7 +2323,7 @@ async function runVideoTweakPipeline({ supabase, generationId, passId, parent, v
   let working = vars;
   const ctx = await getMmaCtxConfig(supabase);
 
-  await chargeGeneration({ passId, generationId, cost: MMA_COSTS.video, reason: "mma_video" });
+  await chargeGeneration({ passId, generationId, cost: MMA_COSTS.video, reason: "mma_video", lane: "video" });
 
   let chatter = null;
 
@@ -2454,8 +2539,9 @@ export async function handleMmaStillTweak({ parentGenerationId, body }) {
       email: body?.email,
     });
 
-  const stillCost = getStillCost(body?.inputs || {});
-  await ensureEnoughCredits(passId, stillCost);
+  const requestedLane = resolveStillLaneFromInputs(body?.inputs || {});
+  const stillCost = stillCostForLane(requestedLane);
+  await ensureEnoughCredits(passId, stillCost, { lane: requestedLane });
 
   const generationId = newUuid();
 
@@ -2532,7 +2618,7 @@ export async function handleMmaVideoTweak({ parentGenerationId, body }) {
       email: body?.email,
     });
 
-  await ensureEnoughCredits(passId, MMA_COSTS.video);
+  await ensureEnoughCredits(passId, MMA_COSTS.video, { lane: "video" });
 
   const generationId = newUuid();
 
@@ -2626,10 +2712,11 @@ export async function handleMmaCreate({ mode, body }) {
     await preflightTypeForMe({ supabase, passId });
   } else {
     if (mode === "video") {
-      await ensureEnoughCredits(passId, MMA_COSTS.video);
+      await ensureEnoughCredits(passId, MMA_COSTS.video, { lane: "video" });
     } else {
-      const stillCost = getStillCost(body?.inputs || {});
-      await ensureEnoughCredits(passId, stillCost);
+      const requestedLane = resolveStillLaneFromInputs(body?.inputs || {});
+      const stillCost = stillCostForLane(requestedLane);
+      await ensureEnoughCredits(passId, stillCost, { lane: requestedLane });
     }
   }
 
