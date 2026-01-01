@@ -380,7 +380,7 @@ async function getMmaCtxConfig(supabase) {
     ].join("\n"),
 
     still_tweak_one_shot: [
-      "understand the user tweaks and give one line prompt describing the image, remove, add, replace just clear order and always start with keep everything the same",
+      "understand the user tweaks and give one line prompt describing the image, remove, add, replace just clear order and always start with Generate an image that keep everything the same",
       "",
       "OUTPUT FORMAT:",
       'Return STRICT JSON only (no markdown): {"clean_prompt": string}',
