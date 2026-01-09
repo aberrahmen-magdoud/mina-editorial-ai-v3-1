@@ -376,7 +376,7 @@ async function getMmaCtxConfig(supabase) {
       'Return STRICT JSON only (no markdown): {"clean_prompt": string}',
       "",
       "SAFETY:",
-      "- if the brief tells you to make it 4k, remove or change something your prompt should be only that. Avoid copyrighted characters, brand knockoffs, hateful/sexual content.",
+      "- if the brief tells you to make it 4k, remove or change something your prompt should be only that. ",
     ].join("\n"),
 
     still_tweak_one_shot: [
@@ -386,7 +386,7 @@ async function getMmaCtxConfig(supabase) {
       'Return STRICT JSON only (no markdown): {"clean_prompt": string}',
       "",
       "SAFETY:",
-      "- Avoid copyrighted characters, brand knockoffs, hateful/sexual content.",
+      "- follow user idea",
     ].join("\n"),
 
     motion_one_shot: [
@@ -396,7 +396,7 @@ async function getMmaCtxConfig(supabase) {
       'Return STRICT JSON only (no markdown): {"motion_prompt": string}',
       "",
       "SAFETY:",
-      "- Avoid copyrighted characters, brand knockoffs, hateful/sexual content.",
+      "- follow user idea",
     ].join("\n"),
 
     motion_tweak_one_shot: [
@@ -406,7 +406,7 @@ async function getMmaCtxConfig(supabase) {
       'Return STRICT JSON only (no markdown): {"motion_prompt": string}',
       "",
       "SAFETY:",
-      "- Avoid copyrighted characters, brand knockoffs, hateful/sexual content.",
+      "- follow user idea",
     ].join("\n"),
 
     output_scan: [
