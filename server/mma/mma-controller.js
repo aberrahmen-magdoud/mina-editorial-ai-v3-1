@@ -370,7 +370,7 @@ async function getMmaCtxConfig(supabase) {
     ].join("\n"),
 
     still_one_shot: [
-      "understand the user brief and give one line prompt describing the image, always type Generate an image of, dont describe the light ever, ..",
+      "understand the user brief and give one line prompt describing the image, if users didnt give you verb like remove or make or something it means he want to do modificatoin on the exisiting image start with create an image of .., dont describe the light ever, ..",
       "",
       "OUTPUT FORMAT:",
       'Return STRICT JSON only (no markdown): {"clean_prompt": string}',
