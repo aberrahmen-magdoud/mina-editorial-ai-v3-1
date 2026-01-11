@@ -1039,7 +1039,20 @@ function pickKlingEndImage(vars, parent) {
   );
 }
 
-async function runKling({ prompt, startImage, endImage, duration, mode, negativePrompt, input: forcedInput }) {
+// ============================================================================
+// Kling runner (supports both v2.1 and v2.6 schema)
+// ============================================================================
+async function runKling({
+  prompt,
+  startImage,
+  endImage, // v2.6 does NOT support end_image (kept for backward compat)
+  duration,
+  mode, // v2.6 does NOT support mode (kept for backward compat)
+  negativePrompt,
+  generateAudio, // v2.6 field
+  aspectRatio,   // v2.6 field (used when no start_image)
+  input: forcedInput,
+}) {
   const replicate = getReplicate();
   const cfg = getMmaConfig();
 
@@ -1049,8 +1062,11 @@ async function runKling({ prompt, startImage, endImage, duration, mode, negative
     cfg?.kling?.model ||
     "kwaivgi/kling-v2.1";
 
-  const defaultDuration =
-    Number(duration ?? cfg?.kling?.duration ?? process.env.MMA_KLING_DURATION ?? 5) || 5;
+  const is26 = /kling[-_/]?v2\.6/i.test(String(version));
+
+  // v2.6: duration must be 5 or 10
+  const rawDuration = Number(duration ?? cfg?.kling?.duration ?? process.env.MMA_KLING_DURATION ?? 5) || 5;
+  const duration26 = rawDuration >= 10 ? 10 : 5;
 
   const envNeg =
     process.env.NEGATIVE_PROMPT_KLING ||
@@ -1060,35 +1076,60 @@ async function runKling({ prompt, startImage, endImage, duration, mode, negative
 
   const finalNeg = negativePrompt !== undefined ? negativePrompt : envNeg;
 
-  const hasEnd = !!asHttpUrl(endImage);
-  const finalMode =
-    safeStr(mode, "") || (hasEnd ? "pro" : "") || cfg?.kling?.mode || process.env.MMA_KLING_MODE || "standard";
+  // Kling-specific timeout (defaults to global)
+  const REPLICATE_MAX_MS_KLING =
+    Number(process.env.MMA_REPLICATE_MAX_MS_KLING || process.env.MMA_REPLICATE_MAX_MS || 240000) || 240000;
 
-  const input = forcedInput
-    ? { ...forcedInput }
-    : {
-        mode: finalMode,
-        prompt,
-        duration: defaultDuration,
-        start_image: startImage,
-        ...(hasEnd ? { end_image: asHttpUrl(endImage) } : {}),
-      };
+  let input;
+  if (forcedInput) {
+    input = { ...forcedInput };
+  } else if (is26) {
+    // ✅ v2.6 schema (no mode, no end_image, optional aspect_ratio, generate_audio)
+    const hasStart = !!asHttpUrl(startImage);
+    const ar =
+      safeStr(aspectRatio, "") ||
+      safeStr(cfg?.kling?.aspectRatio, "") ||
+      safeStr(process.env.MMA_KLING_ASPECT_RATIO, "") ||
+      "16:9";
 
-  if (finalNeg && !input.negative_prompt) input.negative_prompt = finalNeg;
-  if (!input.mode) input.mode = finalMode;
+    input = {
+      prompt,
+      duration: duration26,
+      ...(hasStart ? { start_image: startImage } : { aspect_ratio: ar }),
+      generate_audio: generateAudio !== undefined ? !!generateAudio : true,
+      negative_prompt: safeStr(finalNeg, ""),
+    };
+  } else {
+    // ✅ legacy v2.1-style schema (mode + optional end_image)
+    const defaultDuration = rawDuration;
+    const hasEnd = !!asHttpUrl(endImage);
+    const finalMode =
+      safeStr(mode, "") ||
+      (hasEnd ? "pro" : "") ||
+      cfg?.kling?.mode ||
+      process.env.MMA_KLING_MODE ||
+      "standard";
+
+    input = {
+      mode: finalMode,
+      prompt,
+      duration: defaultDuration,
+      start_image: startImage,
+      ...(hasEnd ? { end_image: asHttpUrl(endImage) } : {}),
+      ...(finalNeg ? { negative_prompt: finalNeg } : {}),
+    };
+  }
+
+  // normalize common fields
   if (!input.prompt) input.prompt = prompt;
-  input.duration = Number(input.duration ?? defaultDuration) || defaultDuration;
-  if (!input.start_image) input.start_image = startImage;
-  if (hasEnd && !input.end_image) input.end_image = asHttpUrl(endImage);
 
   const t0 = Date.now();
 
-  // ✅ Use predictions + poll (prevents “never stops”)
   const pred = await replicatePredictWithTimeout({
     replicate,
     version,
     input,
-    timeoutMs: REPLICATE_MAX_MS,
+    timeoutMs: REPLICATE_MAX_MS_KLING,
     pollMs: REPLICATE_POLL_MS,
     callTimeoutMs: REPLICATE_CALL_TIMEOUT_MS,
     cancelOnTimeout: REPLICATE_CANCEL_ON_TIMEOUT,
@@ -1111,6 +1152,7 @@ async function runKling({ prompt, startImage, endImage, duration, mode, negative
     provider: { prediction },
   };
 }
+
 
 // ============================================================================
 // R2 Public store
