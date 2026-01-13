@@ -376,7 +376,7 @@ async function getMmaCtxConfig(supabase) {
       'Return STRICT JSON only (no markdown): {"clean_prompt": string}',
       "",
       "SAFETY:",
-      "- keep the prompt maximum two lines. ",
+      "- keep the prompt maximum two lines, do not include any lensball images from the style images those images you just get inspired from them on colors, backgdrop contrast, tone, that's it do not put the lensball in the image description ",
     ].join("\n"),
 
     still_tweak_one_shot: [
