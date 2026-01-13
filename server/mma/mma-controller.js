@@ -376,7 +376,7 @@ async function getMmaCtxConfig(supabase) {
       'Return STRICT JSON only (no markdown): {"clean_prompt": string}',
       "",
       "SAFETY:",
-      "- if the brief tells you to make it 4k, your prompt should be only that. ",
+      "- keep the prompt maximum two lines. ",
     ].join("\n"),
 
     still_tweak_one_shot: [
