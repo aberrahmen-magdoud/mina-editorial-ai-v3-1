@@ -371,7 +371,7 @@ async function getMmaCtxConfig(supabase) {
 
     still_one_shot: [
       "You are a luxury fashion art director and prompt engineer. Your task is to translate a user’s creative brief into a single, refined, editorial-grade image generation prompt suitable for a high-end fashion or luxury brand campaign.", 
-      "Follow this order strictly: Main subject, Materials and textures, Composition and camera perspective, Setting or props, Lighting, Color palette, Mood and brand tone, Editorial / campaign reference, Technical quality cues Write one cohesive paragraph Use calm precise sensory language Avoid buzzwords emojis and hype The result should feel like it belongs in Vogue Numéro or a luxury lookbook understand the user brief and give a detailed prompt describing the image dont tell him use the reference for .. no thats your role in understanding the user brief and images that he upload and descide how the end image should look and you start descibing it in depth material, texture, ), start with create an image of",
+      "Follow this order strictly: Main subject, Materials and textures, Composition and camera perspective, Setting or props, Lighting, Color palette, Mood and brand tone, Editorial / campaign reference, Technical quality cues Write one cohesive paragraph Use calm precise sensory language Avoid buzzwords emojis and hype The result should feel like it belongs in Vogue Numéro or a luxury lookbook understand the user brief and give a detailed prompt describing the image dont tell him use the reference for .. no thats your role in understanding the user brief and images that he upload and descide how the end image should look and you start descibing it in depth material, texture, ), start with create an image of or create an image where you replace",
       "",
       "OUTPUT FORMAT:",
       'Return STRICT JSON only (no markdown): {"clean_prompt": string}',
@@ -381,7 +381,7 @@ async function getMmaCtxConfig(supabase) {
       'Generate an image of an elegant editorial still-life portrait of a close-cropped deep skin-tone female model in strict profile with an elongated neck and neutral makeup, wearing the Long Bow Earrings, a delicate bow-shaped top with two long diamond-studded ribbon tails in white metal, pavé-set stones, polished mirror edges and fine prong details, realistic metal and stone textures; skin with subtle pores and natural tone, short cropped hair, minimal wardrobe. muted gradient backdrop, rich deep skin tones, high editorial contrast, crisp earring edges, pronounced material detail on diamonds and metal, no extra accessories, refined and minimalist composition.',
       "",
       "SAFETY:",
-      "- keep the prompt maximum two lines, do not include any lensball images from the style images those images you just get inspired from them on colors, backgdrop contrast, tone, that's it do not put the lensball in the image description ",
+      "- maximum 1 line prompt. if user say replace or keep try to understand which image asthetic and composition he likes and try to just replace his product in the inspration image tone, light, composition, you should start by create an image where you replace ... . Aim for prompt that read like a creative brief rather than a run-on sentence, “maximum clarity” is needed 2 lines are enough, do not include any lensball images from the style images those images you just get inspired from them on colors, backgdrop contrast, tone, that's it do not put the lensball in the image description ",
     ].join("\n"),
 
     still_tweak_one_shot: [
@@ -683,12 +683,25 @@ async function gptMotionOneShotTweak({ cfg, ctx, input, labeledImages }) {
 
 function pickFirstUrl(output) {
   const seen = new Set();
-  const isUrl = (s) => typeof s === "string" && /^https?:\/\//i.test(s);
+
+  const isUrl = (s) => typeof s === "string" && /^https?:\/\//i.test(s.trim());
 
   const walk = (v) => {
     if (!v) return "";
-    if (typeof v === "string") return isUrl(v) ? v : "";
 
+    // ✅ direct string URL
+    if (typeof v === "string") return isUrl(v) ? v.trim() : "";
+
+    // ✅ Replicate FileOutput (ReadableStream) can expose URL via url()
+    // (FileOutput objects have .url() per Replicate docs) :contentReference[oaicite:2]{index=2}
+    if (v && typeof v === "object" && typeof v.url === "function") {
+      try {
+        const u = v.url();
+        if (isUrl(u)) return u.trim();
+      } catch {}
+    }
+
+    // ✅ arrays
     if (Array.isArray(v)) {
       for (const item of v) {
         const u = walk(item);
@@ -697,6 +710,7 @@ function pickFirstUrl(output) {
       return "";
     }
 
+    // ✅ objects
     if (typeof v === "object") {
       if (seen.has(v)) return "";
       seen.add(v);
@@ -705,6 +719,8 @@ function pickFirstUrl(output) {
         "url",
         "output",
         "outputs",
+        "image",
+        "images",
         "video",
         "video_url",
         "videoUrl",
@@ -922,12 +938,12 @@ async function runNanoBanana({
 }
 
 // ---- HARD TIMEOUT settings (4 minutes default) ----
-const REPLICATE_MAX_MS = Number(process.env.MMA_REPLICATE_MAX_MS || 240000) || 240000;
+const REPLICATE_MAX_MS = Number(process.env.MMA_REPLICATE_MAX_MS || 900000) || 900000;
 
 // ✅ Nano Banana can be slow. Give it its own timeout.
 // Set on Render if you want:
 // MMA_REPLICATE_MAX_MS_NANOBANANA=900000   (15 min)
-// MMA_REPLICATE_MAX_MS_NANOBANANA=720000   (12 min)
+// MMA_REPLICATE_MAX_MS_NANOBANANA=900000   (12 min)
 const REPLICATE_MAX_MS_NANOBANANA =
   Number(process.env.MMA_REPLICATE_MAX_MS_NANOBANANA || 900000) || 900000;
 
@@ -1092,7 +1108,7 @@ async function runKling({
 
   // Kling-specific timeout (defaults to global)
   const REPLICATE_MAX_MS_KLING =
-    Number(process.env.MMA_REPLICATE_MAX_MS_KLING || process.env.MMA_REPLICATE_MAX_MS || 240000) || 240000;
+    Number(process.env.MMA_REPLICATE_MAX_MS_KLING || process.env.MMA_REPLICATE_MAX_MS || 900000) || 900000;
 
   let input;
   if (forcedInput) {
