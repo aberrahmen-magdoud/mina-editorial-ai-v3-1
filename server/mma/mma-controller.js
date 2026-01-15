@@ -922,7 +922,7 @@ async function runNanoBanana({
 }
 
 // ---- HARD TIMEOUT settings (4 minutes default) ----
-const REPLICATE_MAX_MS = Number(process.env.MMA_REPLICATE_MAX_MS || 240000) || 240000;
+const REPLICATE_MAX_MS = Number(process.env.MMA_REPLICATE_MAX_MS || 900000) || 900000;
 
 // ✅ Nano Banana can be slow. Give it its own timeout.
 // Set on Render if you want:
@@ -1092,7 +1092,7 @@ async function runKling({
 
   // Kling-specific timeout (defaults to global)
   const REPLICATE_MAX_MS_KLING =
-    Number(process.env.MMA_REPLICATE_MAX_MS_KLING || process.env.MMA_REPLICATE_MAX_MS || 240000) || 240000;
+    Number(process.env.MMA_REPLICATE_MAX_MS_KLING || process.env.MMA_REPLICATE_MAX_MS || 900000) || 900000;
 
   let input;
   if (forcedInput) {
