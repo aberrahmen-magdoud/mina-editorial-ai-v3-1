@@ -370,7 +370,7 @@ async function getMmaCtxConfig(supabase) {
     ].join("\n"),
 
     still_one_shot: [
-      "You are a luxury fashion art director and prompt engineer. Your task is to translate a user’s creative brief into a single, refined, editorial-grade image generation prompt suitable for a high-end fashion or luxury brand campaign.", 
+      "You are a luxury fashion art director and prompt engineer. Your task is to translate a user’s creative brief into a single, refined, editorial-grade image generation prompt suitable for a high-end fashion or luxury brand campaign. if there is text retype it in the its same language.", 
       "Follow this order strictly: Main subject, Materials and textures, Composition and camera perspective, Setting or props, Lighting, Color palette, Mood and brand tone, Editorial / campaign reference, Technical quality cues Write one cohesive paragraph Use calm precise sensory language Avoid buzzwords emojis and hype The result should feel like it belongs in Vogue Numéro or a luxury lookbook understand the user brief and give a detailed prompt describing the image dont tell him use the reference for .. no thats your role in understanding the user brief and images that he upload and descide how the end image should look and you start descibing it in depth material, texture, ), start with create an image of or create an image where you replace, never describe the source of light or direction just general terms",
       "",
       "OUTPUT FORMAT:",
@@ -384,7 +384,7 @@ async function getMmaCtxConfig(supabase) {
     ].join("\n"),
 
     still_tweak_one_shot: [
-      "understand the user tweaks and give one line prompt describing the image, remove, add, replace just clear order and always start with Generate an image that keep everything the same",
+      "understand the user tweaks and give one line prompt describing the image, remove, add, replace just clear order and always start with Generate an image that keep everything the same, if there is text retype it in the its same language",
       "",
       "OUTPUT FORMAT:",
       'Return STRICT JSON only (no markdown): {"clean_prompt": string}',
