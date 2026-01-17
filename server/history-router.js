@@ -15,10 +15,18 @@ const router = express.Router();
 // Config (edit here)
 // =========================
 const HISTORY_MAX_ROWS = Number(process.env.HISTORY_MAX_ROWS || 500);
+const HISTORY_PAGE_DEFAULT = Number(process.env.HISTORY_PAGE_DEFAULT || 200);
+const HISTORY_PAGE_MAX = Number(process.env.HISTORY_PAGE_MAX || HISTORY_MAX_ROWS);
 
 // =========================
 // Helpers
 // =========================
+function clampInt(n, min, max) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return min;
+  return Math.max(min, Math.min(max, Math.floor(x)));
+}
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -186,7 +194,10 @@ router.get("/history/pass/:passId", async (req, res) => {
     // Pull history across candidate passIds so it never “looks empty” due to legacy/passId mismatches
     const passIds = await buildPassCandidates({ primaryPassId, authUser, supabase });
 
-    const { data, error } = await supabase
+    const limit = clampInt(req.query.limit ?? HISTORY_PAGE_DEFAULT, 1, HISTORY_PAGE_MAX);
+    const cursor = safeString(req.query.cursor ?? "", "");
+
+    let q = supabase
       .from("mega_generations")
       .select(
         "mg_id, mg_record_type, mg_pass_id, mg_generation_id, mg_session_id, mg_platform, mg_title, mg_type, mg_prompt, mg_output_url, mg_created_at, mg_meta, mg_payload, mg_mma_vars, mg_content_type, mg_mma_mode"
@@ -194,7 +205,11 @@ router.get("/history/pass/:passId", async (req, res) => {
       .in("mg_pass_id", passIds)
       .in("mg_record_type", ["generation", "feedback", "session"])
       .order("mg_created_at", { ascending: false })
-      .limit(HISTORY_MAX_ROWS);
+      .limit(limit);
+
+    if (cursor) q = q.lt("mg_created_at", cursor);
+
+    const { data, error } = await q;
 
     if (error) throw error;
 
@@ -249,12 +264,22 @@ router.get("/history/pass/:passId", async (req, res) => {
         };
       });
 
+    const nextCursor = rows.length ? String(rows[rows.length - 1].mg_created_at || "") : "";
+    const hasMore = rows.length === limit && !!nextCursor;
+
     return res.json({
       ok: true,
       requestId,
       passId: primaryPassId,
       passIdsChecked: passIds,
       credits: { balance: credits, expiresAt },
+      page: {
+        limit,
+        cursor: cursor || null,
+        nextCursor: nextCursor || null,
+        hasMore,
+        returned: rows.length,
+      },
       sessions,
       generations,
       feedbacks,
