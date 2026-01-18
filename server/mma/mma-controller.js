@@ -2448,7 +2448,12 @@ async function runVideoTweakPipeline({ supabase, generationId, passId, parent, v
   let working = vars;
   const ctx = await getMmaCtxConfig(supabase);
 
-  await chargeGeneration({ passId, generationId, cost: MMA_COSTS.video, reason: "mma_video", lane: "video" });
+  // ✅ compute real cost 5 or 10 (use parent inputs as fallback)
+  const parentVars = parent?.mg_mma_vars && typeof parent.mg_mma_vars === "object" ? parent.mg_mma_vars : {};
+  const mergedInputs0 = { ...(parentVars?.inputs || {}), ...(working?.inputs || {}) };
+  const videoCost = videoCostFromInputs(mergedInputs0);
+
+  await chargeGeneration({ passId, generationId, cost: videoCost, reason: "mma_video", lane: "video" });
 
   let chatter = null;
 
@@ -2461,8 +2466,6 @@ async function runVideoTweakPipeline({ supabase, generationId, passId, parent, v
     emitLine(generationId, working);
 
     let stepNo = 1;
-
-    const parentVars = parent?.mg_mma_vars && typeof parent.mg_mma_vars === "object" ? parent.mg_mma_vars : {};
 
     const startImage =
       asHttpUrl(working?.inputs?.start_image_url || working?.inputs?.startImageUrl) ||
@@ -2835,14 +2838,13 @@ export async function handleMmaCreate({ mode, body }) {
 
   if (mode === "video" && suggestOnly && typeForMe) {
     await preflightTypeForMe({ supabase, passId });
+  } else if (mode === "video") {
+    const neededVideo = videoCostFromInputs(body?.inputs || {});
+    await ensureEnoughCredits(passId, neededVideo, { lane: "video" });
   } else {
-    if (mode === "video") {
-      await ensureEnoughCredits(passId, MMA_COSTS.video, { lane: "video" });
-    } else {
-      const requestedLane = resolveStillLaneFromInputs(body?.inputs || {});
-      const stillCost = stillCostForLane(requestedLane);
-      await ensureEnoughCredits(passId, stillCost, { lane: requestedLane });
-    }
+    const requestedLane = resolveStillLaneFromInputs(body?.inputs || {});
+    const stillCost = stillCostForLane(requestedLane);
+    await ensureEnoughCredits(passId, stillCost, { lane: requestedLane });
   }
 
   const generationId = newUuid();
