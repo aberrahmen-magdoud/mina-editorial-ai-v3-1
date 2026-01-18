@@ -1278,6 +1278,16 @@ const MMA_COSTS = {
   typeForMeCharge: 1,
 };
 
+function resolveVideoDurationSec(inputs) {
+  const d = Number(inputs?.duration ?? inputs?.duration_seconds ?? inputs?.durationSeconds ?? 5) || 5;
+  return d >= 10 ? 10 : 5;
+}
+
+function videoCostFromInputs(inputs) {
+  const sec = resolveVideoDurationSec(inputs);
+  return sec === 10 ? 10 : 5;
+}
+
 function resolveStillLaneFromInputs(inputsLike) {
   const inputs = inputsLike && typeof inputsLike === "object" ? inputsLike : {};
   const raw = safeStr(
@@ -2149,6 +2159,7 @@ async function runVideoAnimatePipeline({ supabase, generationId, passId, parent,
   if (!cfg.enabled) throw new Error("MMA_DISABLED");
 
   let working = vars;
+  let videoCost = 5;
   const ctx = await getMmaCtxConfig(supabase);
 
   const inputs0 = (working?.inputs && typeof working.inputs === "object") ? working.inputs : {};
@@ -2160,7 +2171,8 @@ async function runVideoAnimatePipeline({ supabase, generationId, passId, parent,
     inputs0.useSuggestion === true;
 
   if (!suggestOnly) {
-    await chargeGeneration({ passId, generationId, cost: MMA_COSTS.video, reason: "mma_video", lane: "video" });
+    videoCost = videoCostFromInputs(inputs0);
+    await chargeGeneration({ passId, generationId, cost: videoCost, reason: "mma_video", lane: "video" });
   }
 
   let chatter = null;
@@ -2332,6 +2344,14 @@ async function runVideoAnimatePipeline({ supabase, generationId, passId, parent,
       process.env.MMA_NEGATIVE_PROMPT_KLING ||
       "";
 
+    const generateAudioRaw =
+      working?.inputs?.generate_audio ??
+      working?.inputs?.generateAudio ??
+      working?.inputs?.audio_enabled ??
+      working?.inputs?.audioEnabled;
+
+    const generateAudio = generateAudioRaw === undefined ? true : !!generateAudioRaw;
+
     let klingRes;
     try {
       klingRes = await runKling({
@@ -2341,6 +2361,7 @@ async function runVideoAnimatePipeline({ supabase, generationId, passId, parent,
         duration,
         mode,
         negativePrompt: neg,
+        generateAudio,
       });
       // ✅ store prediction id for recovery later
       working.outputs = { ...(working.outputs || {}), kling_prediction_id: klingRes.prediction_id || null };
@@ -2406,7 +2427,7 @@ async function runVideoAnimatePipeline({ supabase, generationId, passId, parent,
 
     if (!suggestOnly) {
       try {
-        await refundOnFailure({ supabase, passId, generationId, cost: MMA_COSTS.video, err });
+        await refundOnFailure({ supabase, passId, generationId, cost: videoCost, err });
       } catch (e) {
         console.warn("[mma] refund failed (video animate)", e?.message || e);
       }
@@ -2613,7 +2634,7 @@ async function runVideoTweakPipeline({ supabase, generationId, passId, parent, v
       .eq("mg_record_type", "generation");
 
     try {
-      await refundOnFailure({ supabase, passId, generationId, cost: MMA_COSTS.video, err });
+      await refundOnFailure({ supabase, passId, generationId, cost: videoCost, err });
     } catch (e) {
       console.warn("[mma] refund failed (video tweak)", e?.message || e);
     }
