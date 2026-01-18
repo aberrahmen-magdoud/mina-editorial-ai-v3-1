@@ -1164,6 +1164,9 @@ async function runKling({
       ...(hasEnd ? { end_image: asHttpUrl(endImage) } : {}),
       ...(finalNeg ? { negative_prompt: finalNeg } : {}),
     };
+
+    // try to control audio on v2.1 too (if supported by the model schema)
+    if (generateAudio !== undefined) input.generate_audio = !!generateAudio;
   }
 
   // normalize common fields
@@ -1171,15 +1174,41 @@ async function runKling({
 
   const t0 = Date.now();
 
-  const pred = await replicatePredictWithTimeout({
-    replicate,
-    version,
-    input,
-    timeoutMs: REPLICATE_MAX_MS_KLING,
-    pollMs: REPLICATE_POLL_MS,
-    callTimeoutMs: REPLICATE_CALL_TIMEOUT_MS,
-    cancelOnTimeout: REPLICATE_CANCEL_ON_TIMEOUT,
-  });
+  let pred;
+  try {
+    pred = await replicatePredictWithTimeout({
+      replicate,
+      version,
+      input,
+      timeoutMs: REPLICATE_MAX_MS_KLING,
+      pollMs: REPLICATE_POLL_MS,
+      callTimeoutMs: REPLICATE_CALL_TIMEOUT_MS,
+      cancelOnTimeout: REPLICATE_CANCEL_ON_TIMEOUT,
+    });
+  } catch (err) {
+    const msg = String(err?.message || err || "").toLowerCase();
+    const looksLikeBadField =
+      !is26 && msg.includes("input") && (msg.includes("generate_audio") || msg.includes("unexpected"));
+
+    if (looksLikeBadField) {
+      const retryInput = { ...input };
+      delete retryInput.generate_audio;
+
+      pred = await replicatePredictWithTimeout({
+        replicate,
+        version,
+        input: retryInput,
+        timeoutMs: REPLICATE_MAX_MS_KLING,
+        pollMs: REPLICATE_POLL_MS,
+        callTimeoutMs: REPLICATE_CALL_TIMEOUT_MS,
+        cancelOnTimeout: REPLICATE_CANCEL_ON_TIMEOUT,
+      });
+
+      input = retryInput; // keep saved input accurate
+    } else {
+      throw err;
+    }
+  }
 
   const prediction = pred.prediction || {};
   const out = prediction.output;
@@ -2348,9 +2377,17 @@ async function runVideoAnimatePipeline({ supabase, generationId, passId, parent,
       working?.inputs?.generate_audio ??
       working?.inputs?.generateAudio ??
       working?.inputs?.audio_enabled ??
-      working?.inputs?.audioEnabled;
+      working?.inputs?.audioEnabled ??
+      working?.inputs?.with_audio ??
+      working?.inputs?.withAudio ??
+      working?.inputs?.mute ??
+      working?.inputs?.muted;
 
-    const generateAudio = generateAudioRaw === undefined ? true : !!generateAudioRaw;
+    // ✅ default OFF if frontend doesn't send it
+    let generateAudio = generateAudioRaw === undefined ? false : !!generateAudioRaw;
+
+    // ✅ 2 frames (end frame present) => ALWAYS force mute on backend too
+    if (asHttpUrl(endImage)) generateAudio = false;
 
     let klingRes;
     try {
@@ -2573,6 +2610,24 @@ async function runVideoTweakPipeline({ supabase, generationId, passId, parent, v
       process.env.MMA_NEGATIVE_PROMPT_KLING ||
       "";
 
+    const mergedInputsAudio = { ...(parentVars?.inputs || {}), ...(working?.inputs || {}) };
+
+    const generateAudioRaw =
+      mergedInputsAudio?.generate_audio ??
+      mergedInputsAudio?.generateAudio ??
+      mergedInputsAudio?.audio_enabled ??
+      mergedInputsAudio?.audioEnabled ??
+      mergedInputsAudio?.with_audio ??
+      mergedInputsAudio?.withAudio ??
+      mergedInputsAudio?.mute ??
+      mergedInputsAudio?.muted;
+
+    // ✅ default OFF
+    let generateAudio = generateAudioRaw === undefined ? false : !!generateAudioRaw;
+
+    // ✅ 2 frames => force mute
+    if (asHttpUrl(endImage)) generateAudio = false;
+
     let klingRes;
     try {
       klingRes = await runKling({
@@ -2582,6 +2637,7 @@ async function runVideoTweakPipeline({ supabase, generationId, passId, parent, v
         duration,
         mode,
         negativePrompt: neg,
+        generateAudio,
       });
     } finally {
       try {
