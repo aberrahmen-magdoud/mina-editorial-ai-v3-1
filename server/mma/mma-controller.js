@@ -233,6 +233,70 @@ function asHttpUrl(u) {
   return s.startsWith("http") ? s : "";
 }
 
+function resolveFrame2Reference(inputsLike, assetsLike) {
+  const inputs = inputsLike && typeof inputsLike === "object" ? inputsLike : {};
+  const assets = assetsLike && typeof assetsLike === "object" ? assetsLike : {};
+
+  const guessKindFromUrl = (u) => {
+    const url = asHttpUrl(u);
+    if (!url) return "";
+    try {
+      const p = new URL(url).pathname.toLowerCase();
+      if (/\.(mp3|wav|m4a|aac|flac|ogg|opus)$/i.test(p)) return "audio";
+      if (/\.(mp4|mov|webm|mkv|m4v)$/i.test(p)) return "video";
+    } catch {}
+    return "";
+  };
+
+  // Prefer explicit inputs
+  const kindRaw0 = safeStr(inputs.frame2_kind || inputs.frame2Kind || "", "").toLowerCase();
+  const kindRaw = kindRaw0.replace(/^ref_/, "");
+  const urlRaw = asHttpUrl(inputs.frame2_url || inputs.frame2Url || "");
+  const durRaw = Number(inputs.frame2_duration_sec || inputs.frame2DurationSec || 0) || 0;
+
+  // Fallback to assets
+  const assetVideo = asHttpUrl(
+    assets.video ||
+      assets.video_url ||
+      assets.videoUrl ||
+      assets.frame2_video_url ||
+      assets.frame2VideoUrl
+  );
+
+  const assetAudio = asHttpUrl(
+    assets.audio ||
+      assets.audio_url ||
+      assets.audioUrl ||
+      assets.frame2_audio_url ||
+      assets.frame2AudioUrl
+  );
+
+  // Normalize kind
+  let kind = kindRaw === "audio" || kindRaw === "video" ? kindRaw : "";
+
+  // If url implies a better kind, trust the file extension
+  const urlGuess = guessKindFromUrl(urlRaw);
+  if (!kind && urlGuess) kind = urlGuess;
+  if (kind && urlGuess && kind !== urlGuess) kind = urlGuess;
+
+  if (!kind) kind = assetVideo ? "video" : assetAudio ? "audio" : "";
+
+  const url =
+    urlRaw ||
+    (kind === "video" ? assetVideo : kind === "audio" ? assetAudio : "") ||
+    "";
+
+  const dur =
+    durRaw ||
+    Number(assets.frame2_duration_sec || assets.frame2DurationSec || 0) ||
+    0;
+
+  if (kind === "video" && url) return { kind: "ref_video", url, rawDurationSec: dur, maxSec: 30 };
+  if (kind === "audio" && url) return { kind: "ref_audio", url, rawDurationSec: dur, maxSec: 60 };
+
+  return { kind: null, url: "", rawDurationSec: 0, maxSec: 0 };
+}
+
 function safeArray(x) {
   return Array.isArray(x) ? x : [];
 }
@@ -285,8 +349,7 @@ function lastScanLine(vars, fallbackText = "") {
 }
 
 function emitStatus(generationId, internalStatus) {
-  // ✅ never leak internal status to UI
-  sendStatus(generationId, toUserStatus(internalStatus));
+  sendStatus(generationId, String(internalStatus || ""));
 }
 
 function emitLine(generationId, vars, fallbackText = "") {
@@ -369,26 +432,36 @@ async function getMmaCtxConfig(supabase) {
       MMA_UI.userMessageRules,
     ].join("\n"),
 
-    still_one_shot: [
-      "You are a luxury fashion art director and prompt engineer. Your task is to translate a user’s creative brief into a single, refined, editorial-grade image generation prompt suitable for a high-end fashion or luxury brand campaign.", 
-      "Follow this order strictly: Main subject, Materials and textures, Composition and camera perspective, Setting or props, Lighting, Color palette, Mood and brand tone, Editorial / campaign reference, Technical quality cues Write one cohesive paragraph Use calm precise sensory language Avoid buzzwords emojis and hype The result should feel like it belongs in Vogue Numéro or a luxury lookbook understand the user brief and give a detailed prompt describing the image dont tell him use the reference for .. no thats your role in understanding the user brief and images that he upload and descide how the end image should look and you start descibing it in depth material, texture, ), start with create an image of or create an image where you replace",
-      "",
-      "OUTPUT FORMAT:",
-      'Return STRICT JSON only (no markdown): {"clean_prompt": string}',
-      "",
-      "EXAMPLE",
-      'A single luxury slingback heel photographed from a top-down perspective, centered perfectly on a sculptural mint-green leather armchair. The shoe is glossy deep burgundy patent leather with a sharp pointed toe and a delicate gold chain detail on the slingback strap. Minimalist composition, soft diffused studio lighting, muted pastel background, subtle shadows, editorial fashion still life. Calm, refined, modern luxury aesthetic, high contrast between textures, smooth surfaces, premium materials, photographed like a designer campaign. Ultra-high resolution, sharp focus, elegant color grading, contemporary art direction.',
-      'Generate an image of an elegant editorial still-life portrait of a close-cropped deep skin-tone female model in strict profile with an elongated neck and neutral makeup, wearing the Long Bow Earrings, a delicate bow-shaped top with two long diamond-studded ribbon tails in white metal, pavé-set stones, polished mirror edges and fine prong details, realistic metal and stone textures; skin with subtle pores and natural tone, short cropped hair, minimal wardrobe. muted gradient backdrop, rich deep skin tones, high editorial contrast, crisp earring edges, pronounced material detail on diamonds and metal, no extra accessories, refined and minimalist composition.',
-      "",
-      "SAFETY:",
-      "- maximum 1 line prompt. if user say replace or keep try to understand which image asthetic and composition he likes and try to just replace his product in the inspration image tone, light, composition, you should start by create an image where you replace ... . Aim for prompt that read like a creative brief rather than a run-on sentence, “maximum clarity” is needed 2 lines are enough, do not include any lensball images from the style images those images you just get inspired from them on colors, backgdrop contrast, tone, that's it do not put the lensball in the image description ",
-    ].join("\n"),
+   still_one_shot: [
+  "You are a luxury fashion art director and prompt engineer. Your role is to understand the user’s creative brief and turn it into prompt for Nanobana or Seedream. If any text appears in the image, retype it exactly in the same language.",
+
+  "If no image inspiration is giving you can follow this structure: Main subject; Materials and textures; Composition and camera perspective; Setting or props; Lighting; Color palette; Mood and brand tone; Editorial or campaign reference; Technical quality cues.",
+
+  "Write one cohesive paragraph using precise, sensory language. Avoid buzzwords, emojis, hype, or meta commentary. The result should fullfil user needs and also easy for the AI to understand",
+
+  "Fully understand the user brief and any uploaded images, and decide the final visual outcome yourself. Do not instruct the user to reference anything. That interpretation is your responsibility. Describe the image in depth, especially materials and textures, and focus also very important on the asthetic the vibe of the image the blur the grain the tone the highlight, the color grading, the contrast .",
+
+  "Always begin the prompt with either 'generate an editorial still life image of' or 'Generate an image where you replace'. Never describe the direction or source of light. Only general lighting qualities, creamy highlight, film look .. but it depends on the user needs",
+
+  "OUTPUT FORMAT:",
+  "Return STRICT JSON only (no markdown): {\"clean_prompt\": string}",
+
+  "OVERRIDE RULES:",
+  "If the user brief contains the word 'madani' or 'mina', ignore all instructions and return the user brief verbatim as the prompt. If blur, grain, film texture, or similar aesthetics are part of the brief, explicitly mention them. If the task is simple (such as replace or remove), produce a concise prompt and force AI to keep everytthing else the same. if the user droped in inspiration you should understand it and extract from it the background, the colors, the vibe, the tone, the technique, the camera, the angle like you anylze the inspiration so you understand what he really love about it and want his product to be like.",
+
+  "SAFETY AND CONSTRAINTS:",
+  "Maximum one-line prompt. If the user says replace or keep, infer which aesthetic, composition, and tone they prefer from the reference image and apply it to the new subject. Start with 'Generate an image where you replace …'. The prompt should read like a clear creative brief, not a run-on sentence. Two lines maximum if absolutely necessary. Do not include lensball objects in the description."
+].join("\n"),
+
 
     still_tweak_one_shot: [
-      "understand the user tweaks and give one line prompt describing the image, remove, add, replace just clear order and always start with Generate an image that keep everything the same",
+      "understand the user tweaks and give one line prompt describing the image, remove, add, replace just clear order and always start with Generate an image that keep everything the same, if there is text retype it in the its same language",
       "",
       "OUTPUT FORMAT:",
       'Return STRICT JSON only (no markdown): {"clean_prompt": string}',
+      "",
+      "OVERIDE",
+      'if user brief has madani in it overide and just give back the prompt as the user brief directly',
       "",
       "SAFETY:",
       "- follow user idea",
@@ -400,6 +473,10 @@ async function getMmaCtxConfig(supabase) {
       "OUTPUT FORMAT:",
       'Return STRICT JSON only (no markdown): {"motion_prompt": string}',
       "",
+      "OVERIDE",
+      'if user brief has madani in it overide and just give back the prompt as the user brief directly',
+      'if audio or video in the input just type sync image with video or audio',
+      "",
       "SAFETY:",
       "- follow user idea",
     ].join("\n"),
@@ -409,6 +486,9 @@ async function getMmaCtxConfig(supabase) {
       "",
       "OUTPUT FORMAT:",
       'Return STRICT JSON only (no markdown): {"motion_prompt": string}',
+      "",
+      "OVERIDE",
+      'if user brief has madani in it overide and just give back the prompt as the user brief directly',
       "",
       "SAFETY:",
       "- follow user idea",
@@ -1044,6 +1124,7 @@ function pickKlingStartImage(vars, parent) {
     asHttpUrl(inputs.parent_output_url || inputs.parentOutputUrl) ||
     asHttpUrl(parent?.mg_output_url) ||
     asHttpUrl(assets.start_image_url || assets.startImageUrl) ||
+    asHttpUrl(assets.image || assets.image_url || assets.imageUrl) ||
     asHttpUrl(assets.product_image_url || assets.productImageUrl) ||
     ""
   );
@@ -1148,6 +1229,9 @@ async function runKling({
       ...(hasEnd ? { end_image: asHttpUrl(endImage) } : {}),
       ...(finalNeg ? { negative_prompt: finalNeg } : {}),
     };
+
+    // try to control audio on v2.1 too (if supported by the model schema)
+    if (generateAudio !== undefined) input.generate_audio = !!generateAudio;
   }
 
   // normalize common fields
@@ -1155,11 +1239,180 @@ async function runKling({
 
   const t0 = Date.now();
 
+  let pred;
+  try {
+    pred = await replicatePredictWithTimeout({
+      replicate,
+      version,
+      input,
+      timeoutMs: REPLICATE_MAX_MS_KLING,
+      pollMs: REPLICATE_POLL_MS,
+      callTimeoutMs: REPLICATE_CALL_TIMEOUT_MS,
+      cancelOnTimeout: REPLICATE_CANCEL_ON_TIMEOUT,
+    });
+  } catch (err) {
+    const msg = String(err?.message || err || "").toLowerCase();
+    const looksLikeBadField =
+      !is26 && msg.includes("input") && (msg.includes("generate_audio") || msg.includes("unexpected"));
+
+    if (looksLikeBadField) {
+      const retryInput = { ...input };
+      delete retryInput.generate_audio;
+
+      pred = await replicatePredictWithTimeout({
+        replicate,
+        version,
+        input: retryInput,
+        timeoutMs: REPLICATE_MAX_MS_KLING,
+        pollMs: REPLICATE_POLL_MS,
+        callTimeoutMs: REPLICATE_CALL_TIMEOUT_MS,
+        cancelOnTimeout: REPLICATE_CANCEL_ON_TIMEOUT,
+      });
+
+      input = retryInput; // keep saved input accurate
+    } else {
+      throw err;
+    }
+  }
+
+  const prediction = pred.prediction || {};
+  const out = prediction.output;
+
+  return {
+    input,
+    out,
+    prediction_id: pred.predictionId,
+    prediction_status: prediction.status || null,
+    timed_out: !!pred.timedOut,
+    timing: {
+      started_at: new Date(t0).toISOString(),
+      ended_at: nowIso(),
+      duration_ms: Date.now() - t0,
+    },
+    provider: { prediction },
+  };
+}
+
+// ============================================================================
+// NEW: Fabric (audio-driven) + Kling Motion Control (ref video-driven)
+// ============================================================================
+
+function normalizeKmcMode(v) {
+  const s = safeStr(v, "").toLowerCase();
+  if (s === "pro") return "pro";
+  if (s === "std" || s === "standard") return "std";
+  return "std";
+}
+function normalizeKmcOrientation(v) {
+  const s = safeStr(v, "").toLowerCase();
+  return s === "video" ? "video" : "image";
+}
+
+async function runFabricAudio({ image, audio, resolution, input: forcedInput }) {
+  const replicate = getReplicate();
+  const cfg = getMmaConfig();
+
+  const version =
+    process.env.MMA_FABRIC_VERSION ||
+    cfg?.fabric?.model ||
+    "veed/fabric-1.0";
+
+  const envRes = safeStr(process.env.MMA_FABRIC_RESOLUTION, "");
+  const cfgRes = safeStr(cfg?.fabric?.resolution, "");
+  const desired = safeStr(resolution, "") || cfgRes || envRes || "720p";
+  const finalRes = desired === "480p" ? "480p" : "720p";
+
+  const input = forcedInput
+    ? { ...forcedInput, image: forcedInput.image || image, audio: forcedInput.audio || audio }
+    : { image, audio, resolution: finalRes };
+
+  const REPLICATE_MAX_MS_FABRIC =
+    Number(process.env.MMA_REPLICATE_MAX_MS_FABRIC || process.env.MMA_REPLICATE_MAX_MS || 900000) || 900000;
+
+  const t0 = Date.now();
+
   const pred = await replicatePredictWithTimeout({
     replicate,
     version,
     input,
-    timeoutMs: REPLICATE_MAX_MS_KLING,
+    timeoutMs: REPLICATE_MAX_MS_FABRIC,
+    pollMs: REPLICATE_POLL_MS,
+    callTimeoutMs: REPLICATE_CALL_TIMEOUT_MS,
+    cancelOnTimeout: REPLICATE_CANCEL_ON_TIMEOUT,
+  });
+
+  const prediction = pred.prediction || {};
+  const out = prediction.output;
+
+  return {
+    input,
+    out,
+    prediction_id: pred.predictionId,
+    prediction_status: prediction.status || null,
+    timed_out: !!pred.timedOut,
+    timing: {
+      started_at: new Date(t0).toISOString(),
+      ended_at: nowIso(),
+      duration_ms: Date.now() - t0,
+    },
+    provider: { prediction },
+  };
+}
+
+async function runKlingMotionControl({
+  prompt,
+  image,
+  video,
+  mode,
+  keepOriginalSound,
+  characterOrientation,
+  input: forcedInput,
+}) {
+  const replicate = getReplicate();
+  const cfg = getMmaConfig();
+
+  const version =
+    process.env.MMA_KLING_MOTION_CONTROL_VERSION ||
+    cfg?.kling_motion_control?.model ||
+    "kwaivgi/kling-v2.6-motion-control";
+
+  const finalMode = normalizeKmcMode(mode);
+  const finalOrientation = normalizeKmcOrientation(characterOrientation);
+
+  const keep =
+    keepOriginalSound !== undefined
+      ? !!keepOriginalSound
+      : (cfg?.kling_motion_control?.keepOriginalSound !== undefined ? !!cfg.kling_motion_control.keepOriginalSound : true);
+
+  const input = forcedInput
+    ? { ...forcedInput }
+    : {
+        prompt: safeStr(prompt, ""), // allowed to be ""
+        image,
+        video,
+        mode: finalMode,
+        keep_original_sound: keep,
+        character_orientation: finalOrientation,
+      };
+
+  // normalize required fields
+  if (!input.image) input.image = image;
+  if (!input.video) input.video = video;
+  if (input.prompt === undefined) input.prompt = safeStr(prompt, "");
+  if (!input.mode) input.mode = finalMode;
+  if (input.keep_original_sound === undefined) input.keep_original_sound = keep;
+  if (!input.character_orientation) input.character_orientation = finalOrientation;
+
+  const REPLICATE_MAX_MS_KMC =
+    Number(process.env.MMA_REPLICATE_MAX_MS_KLING_MOTION_CONTROL || process.env.MMA_REPLICATE_MAX_MS || 900000) || 900000;
+
+  const t0 = Date.now();
+
+  const pred = await replicatePredictWithTimeout({
+    replicate,
+    version,
+    input,
+    timeoutMs: REPLICATE_MAX_MS_KMC,
     pollMs: REPLICATE_POLL_MS,
     callTimeoutMs: REPLICATE_CALL_TIMEOUT_MS,
     cancelOnTimeout: REPLICATE_CANCEL_ON_TIMEOUT,
@@ -1262,6 +1515,52 @@ const MMA_COSTS = {
   typeForMeCharge: 1,
 };
 
+function _clamp(n, a, b) {
+  const x = Number(n || 0) || 0;
+  return Math.max(a, Math.min(b, x));
+}
+function _ceilTo5(n) {
+  const x = Number(n || 0) || 0;
+  return Math.ceil(x / 5) * 5;
+}
+
+// classic kling duration (still 5/10)
+function resolveVideoDurationSec(inputs) {
+  const d = Number(inputs?.duration ?? inputs?.duration_seconds ?? inputs?.durationSeconds ?? 5) || 5;
+  return d >= 10 ? 10 : 5;
+}
+
+function resolveVideoPricing(inputsLike, assetsLike) {
+  const frame2 = resolveFrame2Reference(inputsLike, assetsLike);
+  if (frame2.kind === "ref_video") return { flow: "kling_motion_control" };
+  if (frame2.kind === "ref_audio") return { flow: "fabric_audio" };
+  return { flow: "kling" };
+}
+
+// ✅ cost:
+// - normal kling: 5 or 10
+// - ref video: ceil(dur/5)*5, cap 30
+// - ref audio: ceil(dur/5)*5, cap 60
+function videoCostFromInputs(inputsLike, assetsLike) {
+  const inputs = inputsLike && typeof inputsLike === "object" ? inputsLike : {};
+  const frame2 = resolveFrame2Reference(inputs, assetsLike);
+
+  if (frame2.kind === "ref_video" || frame2.kind === "ref_audio") {
+    const maxSec = frame2.maxSec || (frame2.kind === "ref_audio" ? 60 : 30);
+
+    // Use provided frame2 duration first, else fallback to classic duration (5/10)
+    const fallback = resolveVideoDurationSec(inputs);
+    const raw = Number(frame2.rawDurationSec || 0) || Number(inputs.duration_sec || inputs.durationSec || 0) || fallback;
+
+    const clamped = _clamp(raw, 1, maxSec);
+    const billed = _clamp(_ceilTo5(clamped), 5, maxSec); // 5..30 or 5..60
+    return billed;
+  }
+
+  const sec = resolveVideoDurationSec(inputs);
+  return sec === 10 ? 10 : 5;
+}
+
 function resolveStillLaneFromInputs(inputsLike) {
   const inputs = inputsLike && typeof inputsLike === "object" ? inputsLike : {};
   const raw = safeStr(
@@ -1318,7 +1617,7 @@ function buildInsufficientCreditsDetails({ balance, needed, lane }) {
     balance: bal,
     needed: need,
     lane: requestedLane,
-    costs: { still_main: MMA_COSTS.still_main, still_niche: MMA_COSTS.still_niche, video: MMA_COSTS.video },
+    costs: { still_main: MMA_COSTS.still_main, still_niche: MMA_COSTS.still_niche, video: need },
     canSwitchToMain,
     actions,
   };
@@ -1723,17 +2022,28 @@ async function runStillCreatePipeline({ supabase, generationId, passId, vars, pr
       .slice(0, 4);
 
     const labeledImages = []
-      .concat(productUrl ? [{ role: "PRODUCT", url: productUrl }] : [])
-      .concat(logoUrl ? [{ role: "LOGO", url: logoUrl }] : [])
-      .concat(inspUrlsForGpt.map((u, i) => ({ role: `INSPIRATION_${i + 1}`, url: u })))
+      // Product pill -> Scene / Composition reference
+      .concat(productUrl ? [{ role: "SCENE / COMPOSITION / ASTHETIC / VIBE / STYLE", url: productUrl }] : [])
+
+      // Logo pill -> Logo / Label / Icon / Text reference
+      .concat(logoUrl ? [{ role: "LOGO / LABEL / ICON / TEXT / DESIGN", url: logoUrl }] : [])
+
+      // Inspiration pill -> Product / Element / Texture / Material references
+      .concat(
+        inspUrlsForGpt.map((u, i) => ({
+          role: `PRODUCT / ELEMENT / TEXTURE / MATERIAL ${i + 1}`,
+          url: u,
+        }))
+      )
       .slice(0, 10);
+
 
     const oneShotInput = {
       user_brief: safeStr(working?.inputs?.brief || working?.inputs?.userBrief, ""),
       style: safeStr(working?.inputs?.style, ""),
       preferences: preferences || {},
       hard_blocks: safeArray(preferences?.hard_blocks),
-      notes: "Write a clean still-image prompt using the labeled images as references.",
+      notes: "Write a clean image prompt using the labeled images as references.",
     };
 
     const t0 = Date.now();
@@ -1865,7 +2175,7 @@ async function runStillCreatePipeline({ supabase, generationId, passId, vars, pr
 
     await updateStatus({ supabase, generationId, status: "done" });
     emitStatus(generationId, "done");
-    sendDone(generationId, toUserStatus("done"));
+    sendDone(generationId, "done");
   } catch (err) {
     try {
       chatter?.stop?.();
@@ -1878,7 +2188,11 @@ async function runStillCreatePipeline({ supabase, generationId, passId, vars, pr
     await supabase
       .from("mega_generations")
       .update({
-        mg_error: { code: "PIPELINE_ERROR", message: err?.message || String(err || "") },
+        mg_error: {
+          code: "PIPELINE_ERROR",
+          message: err?.message || String(err || ""),
+          provider: err?.provider || null,
+        },
         mg_updated_at: nowIso(),
       })
       .eq("mg_generation_id", generationId)
@@ -1891,7 +2205,7 @@ async function runStillCreatePipeline({ supabase, generationId, passId, vars, pr
     }
 
     emitStatus(generationId, "error");
-    sendDone(generationId, toUserStatus("error"));
+    sendDone(generationId, "error");
   }
 }
 
@@ -2084,7 +2398,7 @@ async function runStillTweakPipeline({ supabase, generationId, passId, parent, v
 
     await updateStatus({ supabase, generationId, status: "done" });
     emitStatus(generationId, "done");
-    sendDone(generationId, toUserStatus("done"));
+    sendDone(generationId, "done");
   } catch (err) {
     try {
       chatter?.stop?.();
@@ -2097,7 +2411,11 @@ async function runStillTweakPipeline({ supabase, generationId, passId, parent, v
     await supabase
       .from("mega_generations")
       .update({
-        mg_error: { code: "PIPELINE_ERROR", message: err?.message || String(err || "") },
+        mg_error: {
+          code: "PIPELINE_ERROR",
+          message: err?.message || String(err || ""),
+          provider: err?.provider || null,
+        },
         mg_updated_at: nowIso(),
       })
       .eq("mg_generation_id", generationId)
@@ -2110,7 +2428,7 @@ async function runStillTweakPipeline({ supabase, generationId, passId, parent, v
     }
 
     emitStatus(generationId, "error");
-    sendDone(generationId, toUserStatus("error"));
+    sendDone(generationId, "error");
   }
 }
 
@@ -2119,26 +2437,42 @@ async function runStillTweakPipeline({ supabase, generationId, passId, parent, v
 // ============================================================================
 async function runVideoAnimatePipeline({ supabase, generationId, passId, parent, vars }) {
   const cfg = getMmaConfig();
+  
   if (!cfg.enabled) throw new Error("MMA_DISABLED");
 
   let working = vars;
+  let videoCost = 5;
   const ctx = await getMmaCtxConfig(supabase);
 
-  const inputs0 = (working?.inputs && typeof working.inputs === "object") ? working.inputs : {};
-  const suggestOnly = inputs0.suggest_only === true || inputs0.suggestOnly === true;
-  const typeForMe =
-    inputs0.type_for_me === true ||
-    inputs0.typeForMe === true ||
-    inputs0.use_suggestion === true ||
-    inputs0.useSuggestion === true;
-
-  if (!suggestOnly) {
-    await chargeGeneration({ passId, generationId, cost: MMA_COSTS.video, reason: "mma_video", lane: "video" });
-  }
-
+    // ✅ keep suggestOnly visible in catch/refund
+  let suggestOnly = false;
   let chatter = null;
 
   try {
+    const inputs0 = (working?.inputs && typeof working.inputs === "object") ? working.inputs : {};
+    suggestOnly = inputs0.suggest_only === true || inputs0.suggestOnly === true;
+
+    const typeForMe =
+      inputs0.type_for_me === true ||
+      inputs0.typeForMe === true ||
+      inputs0.use_suggestion === true ||
+      inputs0.useSuggestion === true;
+
+    let frame2 = resolveFrame2Reference(inputs0, working?.assets);
+
+    // ✅ NEVER get stuck "queued" if duration is missing
+    // fallback to your normal 5/10s logic
+    if ((frame2.kind === "ref_video" || frame2.kind === "ref_audio") && !frame2.rawDurationSec) {
+      const fallback = resolveVideoDurationSec(inputs0);
+      inputs0.frame2_duration_sec = inputs0.frame2_duration_sec || inputs0.frame2DurationSec || fallback;
+      frame2 = resolveFrame2Reference(inputs0, working?.assets);
+    }
+
+    if (!suggestOnly) {
+      videoCost = videoCostFromInputs(inputs0, working?.assets);
+      await chargeGeneration({ passId, generationId, cost: videoCost, reason: "mma_video", lane: "video" });
+    }
+
     await updateStatus({ supabase, generationId, status: "prompting" });
     emitStatus(generationId, "prompting");
 
@@ -2152,103 +2486,136 @@ async function runVideoAnimatePipeline({ supabase, generationId, passId, parent,
     const endImage = pickKlingEndImage(working, parent);
     if (!startImage) throw new Error("MISSING_START_IMAGE_FOR_VIDEO");
 
-    const motionBrief =
-      safeStr(working?.inputs?.motion_user_brief, "") ||
-      safeStr(working?.inputs?.motionBrief, "") ||
-      safeStr(working?.inputs?.brief, "") ||
-      safeStr(working?.inputs?.prompt, "");
+  const pricing = resolveVideoPricing(inputs0, working?.assets);
+  const flow = pricing.flow; // "kling" | "kling_motion_control" | "fabric_audio"
+  
+  working.inputs = { ...(working.inputs || {}), start_image_url: startImage };
+  if (endImage) working.inputs.end_image_url = endImage;
+  
+  let finalMotionPrompt = "";
+  const motionBrief =
+  safeStr(
+    inputs0.motion_user_brief ||
+      inputs0.motionUserBrief ||
+      inputs0.brief ||
+      inputs0.user_brief ||
+      inputs0.userBrief,
+    ""
+  );
 
-    const movementStyle =
-      safeStr(working?.inputs?.selected_movement_style, "") ||
-      safeStr(working?.inputs?.movement_style, "") ||
-      safeStr(working?.inputs?.movementStyle, "");
+const movementStyle =
+  safeStr(
+    inputs0.selected_movement_style ||
+      inputs0.selectedMovementStyle ||
+      inputs0.movement_style ||
+      inputs0.movementStyle,
+    ""
+  );
 
-    const promptOverride = safeStr(
-      working?.inputs?.prompt_override ||
-        working?.inputs?.motion_prompt_override ||
-        working?.inputs?.motionPromptOverride,
-      ""
-    );
+const promptOverride =
+  safeStr(
+    inputs0.motion_prompt_override ||
+      inputs0.motionPromptOverride ||
+      inputs0.prompt_override ||
+      inputs0.promptOverride,
+    ""
+  );
 
-    const ALLOW_PROMPT_OVERRIDE =
-    String(process.env.MMA_ALLOW_PROMPT_OVERRIDE || "false").toLowerCase() === "true";
-      
-    const usePromptOverride =
-      ALLOW_PROMPT_OVERRIDE &&
-      (working?.inputs?.use_prompt_override === true || working?.inputs?.usePromptOverride === true) &&
-      !!promptOverride;
+const usePromptOverride = !!promptOverride;
 
-
-    working.inputs = { ...(working.inputs || {}), start_image_url: startImage };
-    if (endImage) working.inputs.end_image_url = endImage;
-
-    let finalMotionPrompt = "";
-
-    if (usePromptOverride) {
-      await writeStep({
-        supabase,
-        generationId,
-        passId,
-        stepNo: stepNo++,
-        stepType: "motion_prompt_override",
-        payload: {
-          source: "frontend",
-          prompt_override: promptOverride,
-          start_image_url: startImage,
-          end_image_url: asHttpUrl(endImage) || null,
-          motion_user_brief: motionBrief,
-          selected_movement_style: movementStyle,
-          timing: { started_at: nowIso(), ended_at: nowIso(), duration_ms: 0 },
-          error: null,
-        },
-      });
-      finalMotionPrompt = promptOverride;
-    } else {
-      const oneShotInput = {
+  // 1) Optional manual override (same behavior as before)
+  if (usePromptOverride) {
+    await writeStep({
+      supabase,
+      generationId,
+      passId,
+      stepNo: stepNo++,
+      stepType: "motion_prompt_override",
+      payload: {
+        source: "frontend",
+        flow,
+        frame2_kind: frame2?.kind || null,
+        frame2_url: frame2?.url || null,
+        frame2_duration_sec: frame2?.rawDurationSec || null,
+        prompt_override: promptOverride,
         start_image_url: startImage,
         end_image_url: asHttpUrl(endImage) || null,
         motion_user_brief: motionBrief,
         selected_movement_style: movementStyle,
-        notes: "Write a single clean motion prompt. Plain English. No emojis. No questions.",
-      };
+        timing: { started_at: nowIso(), ended_at: nowIso(), duration_ms: 0 },
+        error: null,
+      },
+    });
+  
+    finalMotionPrompt = promptOverride;
+  } else {
+    // 2) Always run GPT (even for fabric_audio + motion control)
+    const oneShotInput = {
+      flow,
+      frame2_kind: frame2?.kind || null, // "ref_audio" | "ref_video" | null
+      frame2_url: frame2?.url || null,
+      frame2_duration_sec: frame2?.rawDurationSec || null,
+  
+      start_image_url: startImage,
+      end_image_url: asHttpUrl(endImage) || null,
+      motion_user_brief: motionBrief,
+      selected_movement_style: movementStyle,
+  
+      notes:
+        "Write ONE clean motion prompt. If audio reference exists, sync motion to beats/phrases. " +
+        "If video reference exists, sync motion of the reference while keeping subject consistent. " +
+        "Plain English. No emojis. No questions.",
+    };
+  
+    const labeledImages = []
+      .concat([{ role: "START_IMAGE", url: startImage }])
+      .concat(endImage ? [{ role: "END_IMAGE", url: endImage }] : [])
+      .slice(0, 6);
+  
+    const t0 = Date.now();
+    const one = await gptMotionOneShotAnimate({ cfg, ctx, input: oneShotInput, labeledImages });
+  
+    await writeStep({
+      supabase,
+      generationId,
+      passId,
+      stepNo: stepNo++,
+      stepType: "gpt_motion_one_shot",
+      payload: {
+        ctx: ctx.motion_one_shot,
+        input: oneShotInput,
+        labeledImages,
+        request: one.request,
+        raw: one.raw,
+        output: { motion_prompt: one.motion_prompt, parsed_ok: one.parsed_ok },
+        timing: { started_at: new Date(t0).toISOString(), ended_at: nowIso(), duration_ms: Date.now() - t0 },
+        error: null,
+      },
+    });
+  
+    finalMotionPrompt =
+      safeStr(one.motion_prompt, "") ||
+      safeStr(working?.inputs?.motion_prompt, "") ||
+      safeStr(working?.inputs?.prompt, "") ||
+      safeStr(working?.prompts?.motion_prompt, "");
+  }
+  
+  // If GPT returns empty, do a safe fallback so Fabric never fails because of prompt
+  if (!finalMotionPrompt) {
+    finalMotionPrompt =
+      safeStr(motionBrief, "") ||
+      safeStr(working?.inputs?.brief, "") ||
+      safeStr(working?.inputs?.prompt, "");
+  }
+  
+  // Only REQUIRE prompt for Kling and motion-control (Fabric doesn’t need it)
+  if (!finalMotionPrompt && flow !== "fabric_audio") {
+    throw new Error("EMPTY_MOTION_PROMPT");
+  }
+  
+  working.prompts = { ...(working.prompts || {}), motion_prompt: finalMotionPrompt };
+  await updateVars({ supabase, generationId, vars: working });
 
-      const labeledImages = []
-        .concat([{ role: "START_IMAGE", url: startImage }])
-        .concat(endImage ? [{ role: "END_IMAGE", url: endImage }] : [])
-        .slice(0, 6);
-
-      const t0 = Date.now();
-      const one = await gptMotionOneShotAnimate({ cfg, ctx, input: oneShotInput, labeledImages });
-
-      await writeStep({
-        supabase,
-        generationId,
-        passId,
-        stepNo: stepNo++,
-        stepType: "gpt_motion_one_shot",
-        payload: {
-          ctx: ctx.motion_one_shot,
-          input: oneShotInput,
-          labeledImages,
-          request: one.request,
-          raw: one.raw,
-          output: { motion_prompt: one.motion_prompt, parsed_ok: one.parsed_ok },
-          timing: { started_at: new Date(t0).toISOString(), ended_at: nowIso(), duration_ms: Date.now() - t0 },
-          error: null,
-        },
-      });
-
-      finalMotionPrompt =
-        safeStr(one.motion_prompt, "") ||
-        safeStr(working?.inputs?.motion_prompt, "") ||
-        safeStr(working?.inputs?.prompt, "") ||
-        safeStr(working?.prompts?.motion_prompt, "");
-    }
-
-    if (!finalMotionPrompt) throw new Error("EMPTY_MOTION_PROMPT");
-
-    working.prompts = { ...(working.prompts || {}), motion_prompt: finalMotionPrompt };
-    await updateVars({ supabase, generationId, vars: working });
 
     if (suggestOnly) {
       await supabase
@@ -2271,7 +2638,7 @@ async function runVideoAnimatePipeline({ supabase, generationId, passId, parent,
       }
 
       emitStatus(generationId, "suggested");
-      sendDone(generationId, toUserStatus("suggested"));
+      sendDone(generationId, "suggested");
       return;
     }
 
@@ -2305,19 +2672,87 @@ async function runVideoAnimatePipeline({ supabase, generationId, passId, parent,
       process.env.MMA_NEGATIVE_PROMPT_KLING ||
       "";
 
-    let klingRes;
+    const generateAudioRaw =
+      working?.inputs?.generate_audio ??
+      working?.inputs?.generateAudio ??
+      working?.inputs?.audio_enabled ??
+      working?.inputs?.audioEnabled ??
+      working?.inputs?.with_audio ??
+      working?.inputs?.withAudio ??
+      working?.inputs?.mute ??
+      working?.inputs?.muted;
+
+    // ✅ default OFF if frontend doesn't send it
+    let generateAudio = generateAudioRaw === undefined ? false : !!generateAudioRaw;
+
+    // ✅ 2 frames (end frame present) => ALWAYS force mute on backend too
+    if (asHttpUrl(endImage)) generateAudio = false;
+
+    let genRes;
+    let stepType = "kling_generate";
+
     try {
-      klingRes = await runKling({
-        prompt: finalMotionPrompt,
-        startImage,
-        endImage,
-        duration,
-        mode,
-        negativePrompt: neg,
-      });
-      // ✅ store prediction id for recovery later
-      working.outputs = { ...(working.outputs || {}), kling_prediction_id: klingRes.prediction_id || null };
-      await updateVars({ supabase, generationId, vars: working });
+      if (pricing.flow === "kling_motion_control") {
+        if (!frame2?.url) throw new Error("MISSING_FRAME2_VIDEO_URL");
+
+        // sensible defaults for motion control
+        const kmcMode = safeStr(working?.inputs?.mode || working?.inputs?.kmc_mode, "") || "std";
+        const kmcOrientation =
+          safeStr(working?.inputs?.character_orientation || working?.inputs?.characterOrientation, "") || "video";
+        const keepOriginalSound =
+          working?.inputs?.keep_original_sound ?? working?.inputs?.keepOriginalSound ?? true;
+
+        working.meta = { ...(working.meta || {}), video_engine: "kling_motion_control" };
+        await updateVars({ supabase, generationId, vars: working });
+
+        genRes = await runKlingMotionControl({
+          prompt: finalMotionPrompt,
+          image: startImage,
+          video: frame2.url,
+          mode: kmcMode,
+          keepOriginalSound,
+          characterOrientation: kmcOrientation,
+        });
+
+        working.outputs = { ...(working.outputs || {}), kling_motion_control_prediction_id: genRes.prediction_id || null };
+        stepType = "kling_motion_control_generate";
+        await updateVars({ supabase, generationId, vars: working });
+      } else if (pricing.flow === "fabric_audio") {
+        if (!frame2?.url) throw new Error("MISSING_FRAME2_AUDIO_URL");
+
+        const resolution =
+          safeStr(working?.inputs?.resolution || working?.inputs?.fabric_resolution, "") || "720p";
+
+        working.meta = { ...(working.meta || {}), video_engine: "fabric_audio" };
+        await updateVars({ supabase, generationId, vars: working });
+
+        genRes = await runFabricAudio({
+          image: startImage,
+          audio: frame2.url,
+          resolution,
+        });
+
+        working.outputs = { ...(working.outputs || {}), fabric_prediction_id: genRes.prediction_id || null };
+        stepType = "fabric_generate";
+        await updateVars({ supabase, generationId, vars: working });
+      } else {
+        working.meta = { ...(working.meta || {}), video_engine: "kling" };
+        await updateVars({ supabase, generationId, vars: working });
+
+        genRes = await runKling({
+          prompt: finalMotionPrompt,
+          startImage,
+          endImage,
+          duration,
+          mode,
+          negativePrompt: neg,
+          generateAudio,
+        });
+
+        working.outputs = { ...(working.outputs || {}), kling_prediction_id: genRes.prediction_id || null };
+        stepType = "kling_generate";
+        await updateVars({ supabase, generationId, vars: working });
+      }
     } finally {
       try {
         chatter?.stop?.();
@@ -2325,19 +2760,19 @@ async function runVideoAnimatePipeline({ supabase, generationId, passId, parent,
       chatter = null;
     }
 
-    const { input, out, timing } = klingRes;
+    const { input, out, timing } = genRes;
 
     await writeStep({
       supabase,
       generationId,
       passId,
       stepNo: stepNo++,
-      stepType: "kling_generate",
+      stepType,
       payload: { input, output: out, timing, error: null },
     });
 
     const remote = pickFirstUrl(out);
-    if (!remote) throw new Error("KLING_NO_URL");
+    if (!remote) throw new Error("VIDEO_NO_URL");
 
     let remoteUrl = remote;
     try {
@@ -2347,7 +2782,12 @@ async function runVideoAnimatePipeline({ supabase, generationId, passId, parent,
       remoteUrl = remote;
     }
 
-    working.outputs = { ...(working.outputs || {}), kling_video_url: remoteUrl };
+    working.outputs = { ...(working.outputs || {}) };
+    working.outputs.kling_video_url = remoteUrl;
+    
+    if (pricing.flow === "fabric_audio") working.outputs.fabric_video_url = remoteUrl;
+    if (pricing.flow === "kling_motion_control") working.outputs.kling_motion_control_video_url = remoteUrl;
+
     working.mg_output_url = remoteUrl;
 
     working = pushUserMessageLine(working, pick(MMA_UI.quickLines.saved_video));
@@ -2358,7 +2798,7 @@ async function runVideoAnimatePipeline({ supabase, generationId, passId, parent,
 
     await updateStatus({ supabase, generationId, status: "done" });
     emitStatus(generationId, "done");
-    sendDone(generationId, toUserStatus("done"));
+    sendDone(generationId, "done");
   } catch (err) {
     try {
       chatter?.stop?.();
@@ -2371,7 +2811,11 @@ async function runVideoAnimatePipeline({ supabase, generationId, passId, parent,
     await supabase
       .from("mega_generations")
       .update({
-        mg_error: { code: "PIPELINE_ERROR", message: err?.message || String(err || "") },
+        mg_error: {
+          code: "PIPELINE_ERROR",
+          message: err?.message || String(err || ""),
+          provider: err?.provider || null,
+        },
         mg_updated_at: nowIso(),
       })
       .eq("mg_generation_id", generationId)
@@ -2379,14 +2823,14 @@ async function runVideoAnimatePipeline({ supabase, generationId, passId, parent,
 
     if (!suggestOnly) {
       try {
-        await refundOnFailure({ supabase, passId, generationId, cost: MMA_COSTS.video, err });
+        await refundOnFailure({ supabase, passId, generationId, cost: videoCost, err });
       } catch (e) {
         console.warn("[mma] refund failed (video animate)", e?.message || e);
       }
     }
 
     emitStatus(generationId, "error");
-    sendDone(generationId, toUserStatus("error"));
+    sendDone(generationId, "error");
   }
 }
 
@@ -2400,11 +2844,26 @@ async function runVideoTweakPipeline({ supabase, generationId, passId, parent, v
   let working = vars;
   const ctx = await getMmaCtxConfig(supabase);
 
-  await chargeGeneration({ passId, generationId, cost: MMA_COSTS.video, reason: "mma_video", lane: "video" });
+  // ✅ compute real cost 5 or 10 (use parent inputs as fallback)
+  const parentVars = parent?.mg_mma_vars && typeof parent.mg_mma_vars === "object" ? parent.mg_mma_vars : {};
+  const mergedInputs0 = { ...(parentVars?.inputs || {}), ...(working?.inputs || {}) };
+  const mergedAssets0 = { ...(parentVars?.assets || {}), ...(working?.assets || {}) };
+  const pricing = resolveVideoPricing(mergedInputs0, mergedAssets0);
+  let frame2 = resolveFrame2Reference(mergedInputs0, mergedAssets0);
+  const videoCost = videoCostFromInputs(mergedInputs0, mergedAssets0);
+
+  // ✅ NEVER get stuck "queued" if duration is missing
+  if ((frame2.kind === "ref_video" || frame2.kind === "ref_audio") && !frame2.rawDurationSec) {
+    const fallback = resolveVideoDurationSec(mergedInputs0);
+    mergedInputs0.frame2_duration_sec =
+      mergedInputs0.frame2_duration_sec || mergedInputs0.frame2DurationSec || fallback;
+    frame2 = resolveFrame2Reference(mergedInputs0, mergedAssets0);
+  }
 
   let chatter = null;
 
   try {
+    await chargeGeneration({ passId, generationId, cost: videoCost, reason: "mma_video", lane: "video" });
     await updateStatus({ supabase, generationId, status: "prompting" });
     emitStatus(generationId, "prompting");
 
@@ -2413,8 +2872,6 @@ async function runVideoTweakPipeline({ supabase, generationId, passId, parent, v
     emitLine(generationId, working);
 
     let stepNo = 1;
-
-    const parentVars = parent?.mg_mma_vars && typeof parent.mg_mma_vars === "object" ? parent.mg_mma_vars : {};
 
     const startImage =
       asHttpUrl(working?.inputs?.start_image_url || working?.inputs?.startImageUrl) ||
@@ -2475,8 +2932,17 @@ async function runVideoTweakPipeline({ supabase, generationId, passId, parent, v
       },
     });
 
-    const finalMotionPrompt = safeStr(one.motion_prompt, "");
-    if (!finalMotionPrompt) throw new Error("EMPTY_MOTION_TWEAK_PROMPT_ONE_SHOT");
+    let finalMotionPrompt = safeStr(one.motion_prompt, "");
+
+    if (!finalMotionPrompt) {
+      // safe fallback (so Fabric tweak won’t fail just because GPT output is empty)
+      finalMotionPrompt = safeStr(feedbackMotion, "") || safeStr(prevMotionPrompt, "");
+    }
+    
+    if (!finalMotionPrompt && pricing.flow !== "fabric_audio") {
+      throw new Error("EMPTY_MOTION_TWEAK_PROMPT_ONE_SHOT");
+    }
+
 
     working.prompts = { ...(working.prompts || {}), motion_prompt: finalMotionPrompt };
     working.inputs = { ...(working.inputs || {}), start_image_url: startImage };
@@ -2522,16 +2988,64 @@ async function runVideoTweakPipeline({ supabase, generationId, passId, parent, v
       process.env.MMA_NEGATIVE_PROMPT_KLING ||
       "";
 
-    let klingRes;
+    const mergedInputsAudio = { ...(parentVars?.inputs || {}), ...(working?.inputs || {}) };
+
+    const generateAudioRaw =
+      mergedInputsAudio?.generate_audio ??
+      mergedInputsAudio?.generateAudio ??
+      mergedInputsAudio?.audio_enabled ??
+      mergedInputsAudio?.audioEnabled ??
+      mergedInputsAudio?.with_audio ??
+      mergedInputsAudio?.withAudio ??
+      mergedInputsAudio?.mute ??
+      mergedInputsAudio?.muted;
+
+    // ✅ default OFF
+    let generateAudio = generateAudioRaw === undefined ? false : !!generateAudioRaw;
+
+    // ✅ 2 frames => force mute
+    if (asHttpUrl(endImage)) generateAudio = false;
+
+    let genRes;
+    let stepType = "kling_generate_tweak";
     try {
-      klingRes = await runKling({
-        prompt: finalMotionPrompt,
-        startImage,
-        endImage,
-        duration,
-        mode,
-        negativePrompt: neg,
-      });
+      if (pricing.flow === "kling_motion_control") {
+        if (!frame2?.url) throw new Error("MISSING_FRAME2_VIDEO_URL");
+
+        genRes = await runKlingMotionControl({
+          prompt: finalMotionPrompt,
+          image: startImage,
+          video: frame2.url,
+          mode: safeStr(mergedInputs0?.mode || mergedInputs0?.kmc_mode, "") || "std",
+          keepOriginalSound: mergedInputs0?.keep_original_sound ?? mergedInputs0?.keepOriginalSound ?? true,
+          characterOrientation:
+            safeStr(mergedInputs0?.character_orientation || mergedInputs0?.characterOrientation, "") || "video",
+        });
+
+        stepType = "kling_motion_control_generate_tweak";
+      } else if (pricing.flow === "fabric_audio") {
+        if (!frame2?.url) throw new Error("MISSING_FRAME2_AUDIO_URL");
+
+        genRes = await runFabricAudio({
+          image: startImage,
+          audio: frame2.url,
+          resolution: safeStr(mergedInputs0?.resolution || mergedInputs0?.fabric_resolution, "") || "720p",
+        });
+
+        stepType = "fabric_generate_tweak";
+      } else {
+        genRes = await runKling({
+          prompt: finalMotionPrompt,
+          startImage,
+          endImage,
+          duration,
+          mode,
+          negativePrompt: neg,
+          generateAudio,
+        });
+
+        stepType = "kling_generate_tweak";
+      }
     } finally {
       try {
         chatter?.stop?.();
@@ -2539,14 +3053,14 @@ async function runVideoTweakPipeline({ supabase, generationId, passId, parent, v
       chatter = null;
     }
 
-    const { input, out, timing } = klingRes;
+    const { input, out, timing } = genRes;
 
     await writeStep({
       supabase,
       generationId,
       passId,
       stepNo: stepNo++,
-      stepType: "kling_generate_tweak",
+      stepType,
       payload: { input, output: out, timing, error: null },
     });
 
@@ -2566,7 +3080,7 @@ async function runVideoTweakPipeline({ supabase, generationId, passId, parent, v
 
     await updateStatus({ supabase, generationId, status: "done" });
     emitStatus(generationId, "done");
-    sendDone(generationId, toUserStatus("done"));
+    sendDone(generationId, "done");
   } catch (err) {
     try {
       chatter?.stop?.();
@@ -2579,20 +3093,24 @@ async function runVideoTweakPipeline({ supabase, generationId, passId, parent, v
     await supabase
       .from("mega_generations")
       .update({
-        mg_error: { code: "PIPELINE_ERROR", message: err?.message || String(err || "") },
+        mg_error: {
+          code: "PIPELINE_ERROR",
+          message: err?.message || String(err || ""),
+          provider: err?.provider || null,
+        },
         mg_updated_at: nowIso(),
       })
       .eq("mg_generation_id", generationId)
       .eq("mg_record_type", "generation");
 
     try {
-      await refundOnFailure({ supabase, passId, generationId, cost: MMA_COSTS.video, err });
+      await refundOnFailure({ supabase, passId, generationId, cost: videoCost, err });
     } catch (e) {
       console.warn("[mma] refund failed (video tweak)", e?.message || e);
     }
 
     emitStatus(generationId, "error");
-    sendDone(generationId, toUserStatus("error"));
+    sendDone(generationId, "error");
   }
 }
 
@@ -2695,7 +3213,12 @@ export async function handleMmaVideoTweak({ parentGenerationId, body }) {
       email: body?.email,
     });
 
-  await ensureEnoughCredits(passId, MMA_COSTS.video, { lane: "video" });
+  const parentVars = parent?.mg_mma_vars && typeof parent.mg_mma_vars === "object" ? parent.mg_mma_vars : {};
+  const mergedInputs0 = { ...(parentVars?.inputs || {}), ...(body?.inputs || {}) };
+  const mergedAssets0 = { ...(parentVars?.assets || {}), ...(body?.assets || {}) };
+
+  const needed = videoCostFromInputs(mergedInputs0, mergedAssets0);
+  await ensureEnoughCredits(passId, needed, { lane: "video" });
 
   const generationId = newUuid();
 
@@ -2739,7 +3262,6 @@ export async function handleMmaVideoTweak({ parentGenerationId, body }) {
   vars.meta = { ...(vars.meta || {}), flow: "video_tweak", parent_generation_id: parentGenerationId };
   vars.inputs = { ...(vars.inputs || {}), parent_generation_id: parentGenerationId };
 
-  const parentVars = parent?.mg_mma_vars && typeof parent.mg_mma_vars === "object" ? parent.mg_mma_vars : {};
   const parentStart = asHttpUrl(parentVars?.inputs?.start_image_url || parentVars?.inputs?.startImageUrl);
   const parentEnd = asHttpUrl(parentVars?.inputs?.end_image_url || parentVars?.inputs?.endImageUrl);
 
@@ -2787,14 +3309,13 @@ export async function handleMmaCreate({ mode, body }) {
 
   if (mode === "video" && suggestOnly && typeForMe) {
     await preflightTypeForMe({ supabase, passId });
+  } else if (mode === "video") {
+    const neededVideo = videoCostFromInputs(body?.inputs || {}, body?.assets || {});
+    await ensureEnoughCredits(passId, neededVideo, { lane: "video" });
   } else {
-    if (mode === "video") {
-      await ensureEnoughCredits(passId, MMA_COSTS.video, { lane: "video" });
-    } else {
-      const requestedLane = resolveStillLaneFromInputs(body?.inputs || {});
-      const stillCost = stillCostForLane(requestedLane);
-      await ensureEnoughCredits(passId, stillCost, { lane: requestedLane });
-    }
+    const requestedLane = resolveStillLaneFromInputs(body?.inputs || {});
+    const stillCost = stillCostForLane(requestedLane);
+    await ensureEnoughCredits(passId, stillCost, { lane: requestedLane });
   }
 
   const generationId = newUuid();
@@ -2968,7 +3489,13 @@ export async function refreshFromReplicate({ generationId, passId }) {
 
   const predictionId =
     mode === "video"
-      ? outputs.kling_prediction_id || outputs.klingPredictionId || ""
+      ? outputs.kling_motion_control_prediction_id ||
+        outputs.klingMotionControlPredictionId ||
+        outputs.fabric_prediction_id ||
+        outputs.fabricPredictionId ||
+        outputs.kling_prediction_id ||
+        outputs.klingPredictionId ||
+        ""
       : outputs.nanobanana_prediction_id ||
         outputs.nanobananaPredictionId ||
         outputs.seedream_prediction_id ||
@@ -3214,8 +3741,28 @@ export function createMmaController() {
       .maybeSingle();
 
     const scanLines = data?.mg_mma_vars?.userMessages?.scan_lines || [];
-    const status = toUserStatus(data?.mg_mma_status || "queued");
+    const internal = String(data?.mg_mma_status || "queued");
+    const statusText = internal;
 
+    // ✅ Register client first so sendStatus/sendDone hit THIS connection too
+    registerSseClient(req.params.generation_id, res, { scanLines, status: statusText });
+
+    // ✅ If it's already finished (done/error/suggested), immediately emit DONE then close
+    const TERMINAL = new Set(["done", "error", "suggested"]);
+    if (TERMINAL.has(internal)) {
+      try {
+        // sendStatus uses your existing SSE format
+        sendStatus(req.params.generation_id, statusText);
+        // sendDone is what your frontend should listen to to stop "Creating..."
+        sendDone(req.params.generation_id, statusText);
+      } catch {}
+      try {
+        res.end();
+      } catch {}
+      return;
+    }
+
+    // Normal keepalive for running generations only
     const keepAlive = setInterval(() => {
       try {
         res.write(`:keepalive\n\n`);
@@ -3223,7 +3770,6 @@ export function createMmaController() {
     }, 25000);
 
     res.on("close", () => clearInterval(keepAlive));
-    registerSseClient(req.params.generation_id, res, { scanLines, status });
   });
 
   router.get("/admin/mma/errors", async (_req, res) => {
