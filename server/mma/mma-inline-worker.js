@@ -194,7 +194,7 @@ export function startMmaInlineWorker({
         mg_model: model,
         mg_latency_ms: latencyMs,
         mg_error: null,
-        mg_mma_vars: JSON.stringify(nextVars),
+        mg_mma_vars: nextVars,
       })
       .eq("mg_generation_id", generationId);
   }
