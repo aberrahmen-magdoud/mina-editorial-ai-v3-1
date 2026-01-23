@@ -1,6 +1,6 @@
-// ./server/history-router.js
+﻿// ./server/history-router.js
 // History API for MEGA (reads from mega_generations using mg_* columns)
-// Ensures history doesn’t “look empty” due to passId mismatches (anon short vs pass:anon:*),
+// Ensures history doesnâ€™t â€œlook emptyâ€ due to passId mismatches (anon short vs pass:anon:*),
 // and also supports linked identities via email/user token when available.
 
 import express from "express";
@@ -8,6 +8,15 @@ import crypto from "node:crypto";
 
 import { getSupabaseAdmin, sbEnabled } from "../supabase.js";
 import { megaEnsureCustomer, megaGetCredits } from "../mega-db.js";
+import { getAuthUser } from "./utils/auth.js";
+import { safeString } from "./utils/strings.js";
+import { nowIso } from "./utils/time.js";
+import {
+  buildPassCandidates,
+  clampInt,
+  normalizePassId,
+  sanitizeMmaVarsForClient,
+} from "./history/history-utils.js";
 
 const router = express.Router();
 
@@ -19,150 +28,7 @@ const HISTORY_PAGE_DEFAULT = Number(process.env.HISTORY_PAGE_DEFAULT || 200);
 const HISTORY_PAGE_MAX = Number(process.env.HISTORY_PAGE_MAX || HISTORY_MAX_ROWS);
 
 // =========================
-// Helpers
-// =========================
-function clampInt(n, min, max) {
-  const x = Number(n);
-  if (!Number.isFinite(x)) return min;
-  return Math.max(min, Math.min(max, Math.floor(x)));
-}
-
-function nowIso() {
-  return new Date().toISOString();
-}
-
-function safeString(v, fallback = "") {
-  if (v === null || v === undefined) return fallback;
-  const s = typeof v === "string" ? v : String(v);
-  const t = s.trim();
-  return t ? t : fallback;
-}
-
-function tryParseJson(v) {
-  if (!v) return null;
-  if (typeof v === "object") return v;
-  if (typeof v !== "string") return null;
-  const s = v.trim();
-  if (!s) return null;
-  if (!(s.startsWith("{") || s.startsWith("["))) return null;
-  try {
-    return JSON.parse(s);
-  } catch {
-    return null;
-  }
-}
-
-// IMPORTANT: send only what Profile needs (inputs + assets), remove outputs (provider stuff)
-function sanitizeMmaVarsForClient(rawVars) {
-  const vars = tryParseJson(rawVars) ?? rawVars ?? null;
-  if (!vars || typeof vars !== "object") return null;
-
-  return {
-    meta: vars.meta ?? null,
-    mode: vars.mode ?? null,
-    inputs: vars.inputs ?? null,
-    assets: vars.assets ?? null,
-    history: vars.history ?? null,
-    feedback: vars.feedback ?? null,
-    settings: vars.settings ?? null,
-    version: vars.version ?? null,
-    // intentionally NOT sending vars.outputs / vars.userMessages / etc
-  };
-}
-
-// Keep pass:* untouched.
-// If you receive a legacy anon-short id (uuid only), normalize it to pass:anon:<uuid>.
-function normalizePassId(raw) {
-  const s = safeString(raw, "");
-  if (!s) return "";
-  if (s.startsWith("pass:")) return s;
-  // legacy anon-short
-  return `pass:anon:${s}`;
-}
-
-function getBearerToken(req) {
-  const raw = String(req.headers.authorization || "");
-  const match = raw.match(/^Bearer\s+(.+)$/i);
-  if (!match) return null;
-
-  const token = match[1].trim();
-  const lower = token.toLowerCase();
-  if (!token || lower === "null" || lower === "undefined" || lower === "[object object]") return null;
-  return token;
-}
-
-async function getAuthUser(req) {
-  const token = getBearerToken(req);
-  if (!token) return null;
-
-  const supabase = getSupabaseAdmin();
-  if (!supabase) return null;
-
-  const { data, error } = await supabase.auth.getUser(token);
-  if (error || !data?.user) return null;
-
-  const userId = safeString(data.user.id, "");
-  const email = safeString(data.user.email, "").toLowerCase() || null;
-  if (!userId) return null;
-
-  return { userId, email };
-}
-
-// Build a candidate list so history doesn’t “look empty” due to legacy anon-short IDs
-async function buildPassCandidates({ primaryPassId, authUser, supabase }) {
-  const set = new Set();
-
-  const pid = normalizePassId(primaryPassId);
-  if (pid) set.add(pid);
-
-  // legacy mapping: pass:anon:<uuid> <-> <uuid>
-  if (pid.startsWith("pass:anon:")) {
-    set.add(pid.slice("pass:anon:".length));
-  } else if (!pid.startsWith("pass:")) {
-    set.add(`pass:anon:${pid}`);
-  }
-
-  // if authed, also consider pass:email:<email>
-  if (authUser?.email) {
-    set.add(`pass:email:${authUser.email}`);
-  }
-
-  // include any other passIds that share the same email/user_id in mega_customers
-  try {
-    if (supabase && (authUser?.email || authUser?.userId)) {
-      let q = supabase.from("mega_customers").select("mg_pass_id").limit(50);
-
-      if (authUser?.email && authUser?.userId) {
-        // OR is not great in PostgREST without rpc, so do 2 queries
-        const { data: byEmail } = await supabase
-          .from("mega_customers")
-          .select("mg_pass_id")
-          .eq("mg_email", authUser.email)
-          .limit(50);
-        (byEmail || []).forEach((r) => r?.mg_pass_id && set.add(r.mg_pass_id));
-
-        const { data: byUser } = await supabase
-          .from("mega_customers")
-          .select("mg_pass_id")
-          .eq("mg_user_id", authUser.userId)
-          .limit(50);
-        (byUser || []).forEach((r) => r?.mg_pass_id && set.add(r.mg_pass_id));
-      } else if (authUser?.email) {
-        const { data } = await q.eq("mg_email", authUser.email);
-        (data || []).forEach((r) => r?.mg_pass_id && set.add(r.mg_pass_id));
-      } else if (authUser?.userId) {
-        const { data } = await q.eq("mg_user_id", authUser.userId);
-        (data || []).forEach((r) => r?.mg_pass_id && set.add(r.mg_pass_id));
-      }
-    }
-  } catch {
-    // optional
-  }
-
-  return Array.from(set).filter(Boolean).slice(0, 20);
-}
-
-// =========================
+// Helpers (moved to server/history/history-utils.js)
 // Routes
 // =========================
 
@@ -191,7 +57,7 @@ router.get("/history/pass/:passId", async (req, res) => {
     // Credits for the primary passId
     const { credits, expiresAt } = await megaGetCredits(primaryPassId);
 
-    // Pull history across candidate passIds so it never “looks empty” due to legacy/passId mismatches
+    // Pull history across candidate passIds so it never â€œlooks emptyâ€ due to legacy/passId mismatches
     const passIds = await buildPassCandidates({ primaryPassId, authUser, supabase });
 
     const limit = clampInt(req.query.limit ?? HISTORY_PAGE_DEFAULT, 1, HISTORY_PAGE_MAX);
@@ -241,7 +107,7 @@ router.get("/history/pass/:passId", async (req, res) => {
         createdAt: String(r.mg_created_at || nowIso()),
         meta: r.mg_meta ?? null,
 
-        // ✅ Profile needs this to show the real user brief:
+        // âœ… Profile needs this to show the real user brief:
         mg_mma_vars: sanitizeMmaVarsForClient(r.mg_mma_vars),
       }));
 
@@ -321,3 +187,4 @@ router.delete("/history/:id", async (req, res) => {
 });
 
 export default router;
+
