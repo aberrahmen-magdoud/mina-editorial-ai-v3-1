@@ -277,7 +277,7 @@ export function appendScanLine(vars, text) {
 
 export function makePlaceholderUrl(kind, id) {
   const base = safeString(process.env.R2_PUBLIC_BASE_URL, "https://example.r2.dev");
-  return `${base.replace(/\\/+$/, "")}/${kind}/${id}`;
+  return `${base.replace(/\/+$/, "")}/${kind}/${id}`;
 }
 
 // Backward-compat for callers expecting mma-utils safeArray/safeStr behavior
