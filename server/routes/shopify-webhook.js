@@ -186,7 +186,8 @@ export function registerShopifyWebhook(app) {
       }
 
       const shopifyCustomerId = order?.customer?.id != null ? String(order.customer.id) : null;
-      const email = safeString(order?.email || order?.customer?.email || "").toLowerCase() || null;
+      // Prefer the Shopify customer account email over the checkout email to avoid mismatches.
+      const email = safeString(order?.customer?.email || order?.email || "").toLowerCase() || null;
 
       const supabase = getSupabaseAdmin();
 
