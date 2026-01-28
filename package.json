@@ -2,7 +2,7 @@
   "name": "mina-editorial-ai",
   "version": "1.0.0",
   "type": "module",
-  "main": "index.js",
+  "main": "server.js",
   "scripts": {
     "build": "echo \"no build step\"",
     "start": "node server.js"

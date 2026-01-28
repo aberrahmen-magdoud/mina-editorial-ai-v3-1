@@ -3,22 +3,15 @@
 import "dotenv/config";
 import express from "express";
 
-import { normalizeError } from "./server/logging/normalizeError.js";
-import { logError } from "./server/logging/logError.js";
-import { errorMiddleware } from "./server/logging/errorMiddleware.js";
-
-import { registerCors } from "./server/utils/cors.js";
-import { registerBodyParsers } from "./server/utils/body-parsers.js";
-
-import { registerPublicStats } from "./server/routes/public-stats.js";
-import { registerShopifyWebhook } from "./server/routes/shopify-webhook.js";
-import { registerHistoryRoutes } from "./server/routes/history.js";
-import { registerMmaRoutes } from "./server/routes/mma.js";
-import { registerHealthRoute } from "./server/routes/health.js";
-import { registerShopifySync } from "./server/routes/shopify-sync.js";
-import { registerCreditsRoutes } from "./server/routes/credits.js";
-import { registerR2Routes } from "./server/routes/r2.js";
-import { registerAdminRoutes } from "./server/routes/admin.js";
+import { normalizeError, logError, errorMiddleware } from "./lib/logging.js";
+import { registerCors, registerBodyParsers } from "./lib/utils.js";
+import { registerPublicStats, registerHealthRoute } from "./lib/public.js";
+import { registerShopifyWebhook, registerShopifySync } from "./lib/shopify.js";
+import { registerHistoryRoutes } from "./lib/history.js";
+import { registerMmaRoutes } from "./lib/mma.js";
+import { registerCreditsRoutes } from "./lib/credits.js";
+import { registerR2Routes } from "./lib/r2.js";
+import { registerAdminRoutes } from "./lib/admin.js";
 
 const ENV = process.env;
 const IS_PROD = ENV.NODE_ENV === "production";
