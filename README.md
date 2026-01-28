@@ -6,6 +6,38 @@ Minimal backend for the Mina Editorial AI (MMA + MEGA) service. This repo is now
 - `server.js` starts the Express API and wires all routes.
 - `npm start` runs `node server.js`.
 
+## What this backend does (reference)
+
+### Core data flow
+1. **Client sends a request** (still create, tweak, video animate, feedback, history, etc.).
+2. **PassId is resolved** from body/header and normalized so all data ties to one customer.
+3. **Supabase is the system of record** for customers, sessions, credits, generations, and admin logs.
+4. **MMA pipelines run** (OpenAI for prompt building, Replicate for image/video generation).
+5. **Outputs are stored in R2** and the final public URL is saved in Supabase.
+6. **Clients can stream status** via SSE to see progress in real time.
+
+### External communications
+- **Supabase**: all persistent state (`mega_customers`, `mega_generations`, `mega_admin`).
+- **Shopify**: order webhook credits customers and syncs tags/credits.
+- **OpenAI**: prompt/analysis for MMA stills and motion prompts.
+- **Replicate**: image/video generation (Seedream, NanoBanana, Kling, Fabric).
+- **R2**: permanent storage for generated media and uploads.
+
+### API surface (high level)
+- **MMA** (`/mma/...`): create stills/videos, tweak, events, refresh, and SSE stream.
+- **Credits & sessions** (`/credits/...`, `/sessions/start`, `/feedback/like`): balances, session creation, feedback.
+- **History** (`/history/pass/:passId`): sessions, generations, feedback timeline.
+- **Public** (`/public-stats`, `/health`): lightweight visibility endpoints.
+- **R2 uploads** (`/api/r2/...`): presign, upload, and data URL endpoints.
+- **Shopify** (`/api/credits/shopify-order`, `/shopify/sync`): webhook + sync routes.
+- **Admin** (`/admin/...`, `/admin/mma/...`): summary, credit adjustment, MMA log UI.
+
+### Operational responsibilities
+- **Credit gating** before generation.
+- **User preference updates** from events (likes/dislikes/preferences).
+- **Recovery** via Replicate refresh if a generation finished after a timeout.
+- **Audit/error logging** to Supabase for admin visibility.
+
 ## Files and folders
 
 ### Root
