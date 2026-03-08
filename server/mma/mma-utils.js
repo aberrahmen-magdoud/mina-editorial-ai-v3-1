@@ -177,6 +177,23 @@ export function makeInitialVars({
   const typeForMe = inputs.type_for_me ?? inputs.typeForMe ?? inputs.use_suggestion ?? false;
   const suggestOnly = inputs.suggest_only ?? inputs.suggestOnly ?? false;
 
+  // ✅ KEEP audio / mute flags so pipelines can read them later
+  const generateAudioInput =
+    inputs.generate_audio ??
+    inputs.generateAudio ??
+    inputs.audio_enabled ??
+    inputs.audioEnabled ??
+    inputs.with_audio ??
+    inputs.withAudio ??
+    null;
+
+  const mutedInput =
+    inputs.muted ??
+    inputs.mute ??
+    inputs.audio_muted ??
+    inputs.audioMuted ??
+    null;
+
   // --------
   // Prompts canonical fields
   // --------
@@ -293,6 +310,14 @@ export function makeInitialVars({
       type_for_me: !!typeForMe,
       suggest_only: !!suggestOnly,
 
+      // ✅ KEEP audio flags
+      generate_audio: generateAudioInput,
+      muted: mutedInput,
+
+      // optional legacy mirrors
+      generateAudio: generateAudioInput,
+      mute: mutedInput,
+
       // ✅ keep prompt override controls (your controller reads these)
       use_prompt_override: !!(inputs.use_prompt_override ?? inputs.usePromptOverride ?? false),
       prompt_override: safeString(
@@ -311,7 +336,7 @@ export function makeInitialVars({
       // keep old fields too
       userBrief: safeString(inputs.userBrief, ""),
       style: safeString(inputs.style, ""),
-      movement_style: safeString(inputs.movement_style, ""), // legacy
+      movement_style: safeString(inputs.movement_style, ""),
 
       platform: safeString(inputs.platform || inputs.platformKey, ""),
       aspect_ratio: safeString(inputs.aspect_ratio || inputs.aspectRatio, ""),
