@@ -1,5 +1,6 @@
 // ./server/mma/mma-controller.js
 import express from "express";
+import crypto from "node:crypto";
 import OpenAI from "openai";
 import Replicate from "replicate";
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
@@ -1449,7 +1450,6 @@ function buildKlingJwt(accessKey, secretKey) {
   const encodedHeader = base64UrlEncode(JSON.stringify(header));
   const encodedPayload = base64UrlEncode(JSON.stringify(payload));
 
-  const crypto = require("crypto");
   const signature = crypto
     .createHmac("sha256", secretKey)
     .update(`${encodedHeader}.${encodedPayload}`)
