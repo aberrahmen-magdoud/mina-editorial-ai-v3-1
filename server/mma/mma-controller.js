@@ -1534,8 +1534,6 @@ async function runKling({
   // normalize required fields
   if (input.prompt === undefined) input.prompt = safeStr(prompt, "");
 
-  console.log("[mma][audio-debug] runKling final input.generate_audio:", input.generate_audio, "| param generateAudio:", generateAudio, "| version:", version);
-
   const t0 = Date.now();
 
   let pred;
@@ -3082,14 +3080,19 @@ const usePromptOverride = !!promptOverride;
     // ✅ 2 frames (end frame present) => ALWAYS force mute on backend too
     if (asHttpUrl(endImage)) generateAudio = false;
 
-    console.log("[mma][audio-debug] generate_audio resolution:", {
-      "working.inputs.generate_audio": working?.inputs?.generate_audio,
-      "working.inputs.generateAudio": working?.inputs?.generateAudio,
-      generateAudioRaw,
-      muteRaw,
-      generateAudio,
-      hasEndImage: !!asHttpUrl(endImage),
-    });
+    // ✅ persist resolved audio flag into meta so it's visible in Supabase
+    working.meta = {
+      ...(working.meta || {}),
+      _audio_debug: {
+        input_generate_audio: working?.inputs?.generate_audio,
+        input_mute: working?.inputs?.mute,
+        generateAudioRaw,
+        muteRaw,
+        resolved_generateAudio: generateAudio,
+        hasEndImage: !!asHttpUrl(endImage),
+      },
+    };
+    await updateVars({ supabase, generationId, vars: working });
 
     let genRes;
     let stepType = "kling_generate";
