@@ -233,6 +233,19 @@ function asHttpUrl(u) {
   return s.startsWith("http") ? s : "";
 }
 
+function parseOptionalBool(v) {
+  if (v === undefined || v === null) return undefined;
+  if (typeof v === "boolean") return v;
+  if (typeof v === "number") return v !== 0;
+
+  const s = safeStr(v, "").toLowerCase();
+  if (!s) return undefined;
+  if (["1", "true", "yes", "y", "on"].includes(s)) return true;
+  if (["0", "false", "no", "n", "off"].includes(s)) return false;
+
+  return Boolean(v);
+}
+
 function resolveFrame2Reference(inputsLike, assetsLike) {
   const inputs = inputsLike && typeof inputsLike === "object" ? inputsLike : {};
   const assets = assetsLike && typeof assetsLike === "object" ? assetsLike : {};
@@ -3071,10 +3084,13 @@ const usePromptOverride = !!promptOverride;
       working?.inputs?.mute ??
       working?.inputs?.muted;
 
+    const generateAudioParsed = parseOptionalBool(generateAudioRaw);
+    const muteParsed = parseOptionalBool(muteRaw);
+
     // ✅ default ON unless explicitly disabled
     let generateAudio =
-      generateAudioRaw !== undefined ? !!generateAudioRaw :
-      muteRaw !== undefined ? !Boolean(muteRaw) :
+      generateAudioParsed !== undefined ? generateAudioParsed :
+      muteParsed !== undefined ? !muteParsed :
       true;
 
     // ✅ 2 frames (end frame present) => ALWAYS force mute on backend too
@@ -3398,10 +3414,13 @@ async function runVideoTweakPipeline({ supabase, generationId, passId, parent, v
       mergedInputsAudio?.mute ??
       mergedInputsAudio?.muted;
 
+    const generateAudioParsed = parseOptionalBool(generateAudioRaw);
+    const muteParsed = parseOptionalBool(muteRaw);
+
     // ✅ default ON unless explicitly disabled
     let generateAudio =
-      generateAudioRaw !== undefined ? !!generateAudioRaw :
-      muteRaw !== undefined ? !Boolean(muteRaw) :
+      generateAudioParsed !== undefined ? generateAudioParsed :
+      muteParsed !== undefined ? !muteParsed :
       true;
 
     // ✅ 2 frames => force mute
