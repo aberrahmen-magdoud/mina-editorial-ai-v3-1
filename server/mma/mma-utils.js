@@ -320,7 +320,11 @@ export function makeInitialVars({
       negative_prompt: safeString(inputs.negative_prompt || inputs.negativePrompt, ""),
 
       // audio / mute controls – pass through so the controller can respect the UI toggle
-      generate_audio: inputs.generate_audio ?? inputs.generateAudio ?? undefined,
+      generate_audio: (() => {
+        const v = inputs.generate_audio ?? inputs.generateAudio ?? undefined;
+        console.log("[mma][audio-debug] makeInitialVars: inputs.generate_audio =", inputs.generate_audio, "| inputs.generateAudio =", inputs.generateAudio, "| result =", v);
+        return v;
+      })(),
       mute: inputs.mute ?? inputs.muted ?? undefined,
       keep_original_sound: inputs.keep_original_sound ?? inputs.keepOriginalSound ?? undefined,
     },
