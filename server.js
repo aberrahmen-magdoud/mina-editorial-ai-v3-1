@@ -600,8 +600,10 @@ app.post("/auth/shopify-sync", async (req, res) => {
     const passId = normalizeIncomingPassId(`pass:user:${authUser.userId}`);
     setPassIdHeader(res, passId);
 
+    let isNewUser = false;
     if (sbEnabled()) {
-      await megaEnsureCustomer({ passId, userId: authUser.userId, email: authUser.email || null });
+      const ensureResult = await megaEnsureCustomer({ passId, userId: authUser.userId, email: authUser.email || null });
+      isNewUser = !!ensureResult?.isNew;
             // ✅ Pull any credits from Shopify/email passIds into the logged-in user passId
       try {
         const supabase = getSupabaseAdmin();
@@ -616,9 +618,61 @@ app.post("/auth/shopify-sync", async (req, res) => {
 
     }
 
-    return res.status(200).json({ ok: true, loggedIn: true, passId, email: authUser.email || null });
+    return res.status(200).json({ ok: true, loggedIn: true, passId, email: authUser.email || null, isNewUser });
   } catch {
     return res.status(200).json({ ok: true, loggedIn: false, degraded: true });
+  }
+});
+
+// ======================================================
+// Welcome matcha claim (5 free matchas for new users, 30-day expiry)
+// SKU: MINA-5, idempotent per passId
+// ======================================================
+app.post("/api/welcome-matcha/claim", async (req, res) => {
+  const requestId = `welcome_${Date.now()}_${crypto.randomUUID()}`;
+
+  try {
+    if (!sbEnabled()) return res.status(503).json({ ok: false, requestId, error: "NO_SUPABASE" });
+
+    const authUser = await getAuthUser(req);
+    if (!authUser?.userId) {
+      return res.status(401).json({ ok: false, requestId, error: "NOT_AUTHENTICATED" });
+    }
+
+    const passId = normalizeIncomingPassId(`pass:user:${authUser.userId}`);
+    await megaEnsureCustomer({ passId, userId: authUser.userId, email: authUser.email || null });
+
+    // Idempotent: one welcome claim per passId
+    const refType = "welcome_matcha";
+    const refId = `welcome:${passId}`;
+
+    const already = await megaHasCreditRef({ refType, refId });
+    if (already) {
+      const { credits, expiresAt } = await megaGetCredits(passId);
+      return res.json({ ok: true, requestId, passId, alreadyClaimed: true, balance: credits, expiresAt });
+    }
+
+    const result = await megaAdjustCredits({
+      passId,
+      delta: 5,
+      reason: "welcome_matcha",
+      source: "system",
+      refType,
+      refId,
+      grantedAt: nowIso(),
+    });
+
+    return res.json({
+      ok: true,
+      requestId,
+      passId,
+      credited: 5,
+      balance: result.creditsAfter,
+      expiresAt: result.expiresAt,
+    });
+  } catch (e) {
+    console.error("POST /api/welcome-matcha/claim failed", e);
+    return res.status(500).json({ ok: false, requestId, error: "INTERNAL" });
   }
 });
 
