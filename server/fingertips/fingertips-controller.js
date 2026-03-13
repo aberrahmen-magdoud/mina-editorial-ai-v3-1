@@ -460,9 +460,9 @@ export async function handleFingertipsGenerate({ passId, modelKey, inputs }) {
     }
     cleanedInputs.negative_prompt = cleanedInputs.negative_prompt || model.defaultNegative || "";
 
-    // Force resolution to 1024 to avoid CUDA OOM on large images
+    // Force resolution to 2048 to get high-quality upscale while avoiding CUDA OOM
     if (model.variant === "magic") {
-      cleanedInputs.resolution = "1024";
+      cleanedInputs.resolution = "2048";
     }
   }
 
@@ -532,14 +532,60 @@ export async function handleFingertipsGenerate({ passId, modelKey, inputs }) {
     };
   }
 
-  // 6. Success — normalize URL to R2, then finalize
+  // 6. Success — extract output URL, store to R2 (NEVER expose provider URLs)
   const rawOutputUrl = extractOutputUrl(result.output);
 
-  let outputUrl = rawOutputUrl;
+  if (!rawOutputUrl) {
+    console.error("[fingertips] extractOutputUrl returned null for model", modelKey,
+      "| prediction:", result.predictionId,
+      "| output type:", typeof result.output,
+      "| output:", JSON.stringify(result.output)?.slice(0, 500));
+
+    // Refund — no usable output
+    const refundResult = await refundFingertips({ passId, generationId, modelKey });
+    if (supabase) {
+      await supabase
+        .from("mega_generations")
+        .update({
+          mg_mma_status: "error",
+          mg_status: "failed",
+          mg_error: { code: "NO_OUTPUT_URL", message: "Provider returned no usable image." },
+          mg_mma_vars: { modelKey, inputs: cleanedInputs, charge: chargeResult, refund: refundResult },
+          mg_updated_at: nowIso(),
+        })
+        .eq("mg_id", `generation:${generationId}`);
+    }
+    throw makeHttpError(502, "FINGERTIPS_GENERATION_FAILED", {
+      generationId, modelKey, refunded: refundResult.refunded,
+      message: "Generation produced no image. You were not charged.",
+    });
+  }
+
+  // Always persist to our own R2 — never return provider URLs to the client
+  let outputUrl;
   try {
     outputUrl = await storeToR2(rawOutputUrl, `fingertips/${modelKey}/${generationId}`);
   } catch (e) {
-    console.warn("[fingertips] storeToR2 failed, using raw Replicate URL:", e?.message || e);
+    console.error("[fingertips] storeToR2 failed for model", modelKey, ":", e?.message || e);
+
+    // Refund — we can't serve a provider URL
+    const refundResult = await refundFingertips({ passId, generationId, modelKey });
+    if (supabase) {
+      await supabase
+        .from("mega_generations")
+        .update({
+          mg_mma_status: "error",
+          mg_status: "failed",
+          mg_error: { code: "R2_STORE_FAILED", message: "Failed to store generated image." },
+          mg_mma_vars: { modelKey, inputs: cleanedInputs, charge: chargeResult, refund: refundResult },
+          mg_updated_at: nowIso(),
+        })
+        .eq("mg_id", `generation:${generationId}`);
+    }
+    throw makeHttpError(502, "FINGERTIPS_GENERATION_FAILED", {
+      generationId, modelKey, refunded: refundResult.refunded,
+      message: "Could not save generated image. You were not charged.",
+    });
   }
 
   if (supabase) {
@@ -559,9 +605,7 @@ export async function handleFingertipsGenerate({ passId, modelKey, inputs }) {
   return {
     generation_id: generationId,
     status: "done",
-    model: model.replicateModel,
     model_key: modelKey,
-    output: result.output,
     output_url: outputUrl,
     prediction_id: result.predictionId,
     elapsed_ms: result.elapsedMs,
@@ -638,8 +682,34 @@ export function listFingertipsModels() {
 // ============================================================================
 function extractOutputUrl(output) {
   if (!output) return null;
+
+  // Plain string URL (most common)
   if (typeof output === "string") return output;
-  if (Array.isArray(output) && output.length > 0) return typeof output[0] === "string" ? output[0] : null;
-  if (typeof output === "object" && output.url) return output.url;
+
+  // FileOutput objects (Replicate SDK >=1.0) — have .url() method or .url property
+  if (typeof output === "object" && !Array.isArray(output)) {
+    if (typeof output.url === "function") return output.url();
+    if (typeof output.url === "string" && output.url) return output.url;
+    // Some models return { image: "url" } or { output: "url" }
+    if (typeof output.image === "string" && output.image) return output.image;
+    if (typeof output.output === "string" && output.output) return output.output;
+    // toString() fallback for FileOutput-like objects
+    const str = String(output);
+    if (str && str.startsWith("http")) return str;
+  }
+
+  // Array of URLs or FileOutput objects
+  if (Array.isArray(output) && output.length > 0) {
+    const first = output[0];
+    if (typeof first === "string") return first;
+    if (typeof first === "object" && first) {
+      if (typeof first.url === "function") return first.url();
+      if (typeof first.url === "string" && first.url) return first.url;
+    }
+    const str = String(first);
+    if (str && str.startsWith("http")) return str;
+  }
+
+  console.warn("[fingertips] extractOutputUrl: unrecognized output format:", typeof output, JSON.stringify(output)?.slice(0, 300));
   return null;
 }
