@@ -3,7 +3,7 @@
 
 // ============================================================================
 // COST TABLE
-// Each model costs a fraction of 1 matcha per generation.
+// Each model costs a fraction of 1 matcha per generation. except upscaler
 // The billing system deducts 1 whole matcha at a time into a "fingertips pool",
 // then draws down from that pool until exhausted.
 // ============================================================================
@@ -60,7 +60,7 @@ export const FINGERTIPS_MODELS = {
   },
 
   remove_bg: {
-    replicateModel: "bria/remove-background",
+    replicateModel: "851-labs/background-remover,
     costPerGeneration: 0.2, // 5 generations = 1 matcha
     label: "Remove Background",
     description: "Remove backgrounds with 256 levels of transparency",
@@ -72,7 +72,7 @@ export const FINGERTIPS_MODELS = {
 
   upscale: {
     replicateModel: "philz1337x/crystal-upscaler",
-    costPerGeneration: 0.1, // 10 generations = 1 matcha
+    costPerGeneration: 2.5, // 10 generations = 1 matcha
     label: "Crystal Upscaler",
     description: "Upscale images with AI-enhanced detail",
     // Required: image. Optional: scale_factor
