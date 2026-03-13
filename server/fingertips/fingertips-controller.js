@@ -15,6 +15,7 @@
 import crypto from "node:crypto";
 import Replicate from "replicate";
 import OpenAI from "openai";
+import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 
 import {
   megaEnsureCustomer,
@@ -73,6 +74,66 @@ async function describeImageForUpscale(imageUrl) {
   });
 
   return (resp.choices?.[0]?.message?.content || "").trim();
+}
+
+// ============================================================================
+// R2 storage — normalize Replicate URLs to permanent assets bucket
+// ============================================================================
+let _r2 = null;
+function getR2() {
+  if (_r2) return _r2;
+  const accountId = process.env.R2_ACCOUNT_ID || "";
+  const endpoint = process.env.R2_ENDPOINT || (accountId ? `https://${accountId}.r2.cloudflarestorage.com` : "");
+  const accessKeyId = process.env.R2_ACCESS_KEY_ID || "";
+  const secretAccessKey = process.env.R2_SECRET_ACCESS_KEY || "";
+  const bucket = process.env.R2_BUCKET || "";
+  const publicBase = process.env.R2_PUBLIC_BASE_URL || "";
+  const enabled = !!(endpoint && accessKeyId && secretAccessKey && bucket && publicBase);
+  const client = enabled
+    ? new S3Client({ region: "auto", endpoint, credentials: { accessKeyId, secretAccessKey } })
+    : null;
+  _r2 = { enabled, client, bucket, publicBase };
+  return _r2;
+}
+
+function guessExt(url, fallback = ".png") {
+  try {
+    const p = new URL(url).pathname.toLowerCase();
+    if (p.endsWith(".png")) return ".png";
+    if (p.endsWith(".jpg") || p.endsWith(".jpeg")) return ".jpg";
+    if (p.endsWith(".webp")) return ".webp";
+    if (p.endsWith(".gif")) return ".gif";
+    if (p.endsWith(".svg")) return ".svg";
+    return fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+async function storeToR2(url, keyPrefix) {
+  const { enabled, client, bucket, publicBase } = getR2();
+  if (!enabled || !client) return url; // R2 not configured — pass through
+  if (!url || typeof url !== "string") return url;
+  if (publicBase && url.startsWith(publicBase)) return url; // already ours
+
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`R2_FETCH_FAILED_${res.status}`);
+
+  const buf = Buffer.from(await res.arrayBuffer());
+  const contentType = res.headers.get("content-type") || "application/octet-stream";
+  const ext = guessExt(url, ".png");
+  const objKey = `${keyPrefix}${ext}`;
+
+  await client.send(
+    new PutObjectCommand({
+      Bucket: bucket,
+      Key: objKey,
+      Body: buf,
+      ContentType: contentType,
+    })
+  );
+
+  return `${publicBase.replace(/\/$/, "")}/${objKey}`;
 }
 
 // ============================================================================
@@ -466,8 +527,15 @@ export async function handleFingertipsGenerate({ passId, modelKey, inputs }) {
     };
   }
 
-  // 6. Success — finalize
-  const outputUrl = extractOutputUrl(result.output);
+  // 6. Success — normalize URL to R2, then finalize
+  const rawOutputUrl = extractOutputUrl(result.output);
+
+  let outputUrl = rawOutputUrl;
+  try {
+    outputUrl = await storeToR2(rawOutputUrl, `fingertips/${modelKey}/${generationId}`);
+  } catch (e) {
+    console.warn("[fingertips] storeToR2 failed, using raw Replicate URL:", e?.message || e);
+  }
 
   if (supabase) {
     await supabase
