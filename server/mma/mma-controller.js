@@ -234,6 +234,26 @@ function asHttpUrl(u) {
   return s.startsWith("http") ? s : "";
 }
 
+function withKlingImageSizing(u) {
+  const raw = asHttpUrl(u);
+  if (!raw) return "";
+
+  try {
+    const parsed = new URL(raw);
+    const host = parsed.hostname.toLowerCase();
+    if (!host.endsWith("faltastudio.com")) return raw;
+
+    // Avoid double-transforming links that already include Cloudflare image params.
+    if (parsed.pathname.includes("/cdn-cgi/image/")) return raw;
+
+    const transformedPath =
+      `/cdn-cgi/image/width=2048,fit=scale-down,quality=88,format=jpeg${parsed.pathname}`;
+    return `${parsed.protocol}//${parsed.host}${transformedPath}${parsed.search}${parsed.hash}`;
+  } catch {
+    return raw;
+  }
+}
+
 function parseOptionalBool(v) {
   if (v === undefined || v === null) return undefined;
   if (typeof v === "boolean") return v;
@@ -1436,7 +1456,7 @@ function pickKlingStartImage(vars, parent) {
   const assets = vars?.assets || {};
   const inputs = vars?.inputs || {};
 
-  return (
+  return withKlingImageSizing(
     asHttpUrl(inputs.start_image_url || inputs.startImageUrl) ||
     asHttpUrl(inputs.parent_output_url || inputs.parentOutputUrl) ||
     asHttpUrl(parent?.mg_output_url) ||
@@ -1451,7 +1471,7 @@ function pickKlingEndImage(vars, parent) {
   const assets = vars?.assets || {};
   const inputs = vars?.inputs || {};
 
-  return (
+  return withKlingImageSizing(
     asHttpUrl(inputs.end_image_url || inputs.endImageUrl) ||
     asHttpUrl(assets.end_image_url || assets.endImageUrl) ||
     ""
