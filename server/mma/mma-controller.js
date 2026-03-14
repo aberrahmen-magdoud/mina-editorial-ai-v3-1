@@ -4,6 +4,7 @@ import crypto from "node:crypto";
 import OpenAI from "openai";
 import Replicate from "replicate";
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+import sharp from "sharp";
 
 import {
   resolvePassId as megaResolvePassId, // ✅ so createMmaController routes don't mismatch passId
@@ -1304,8 +1305,13 @@ async function runNanoBananaGemini(opts = {}) {
   }
 
   const blob = imgPart.inlineData || imgPart.inline_data;
-  const mime = blob.mimeType || blob.mime_type || "image/png";
-  const bytes = Buffer.from(blob.data, "base64");
+  let mime = blob.mimeType || blob.mime_type || "image/png";
+  let bytes = Buffer.from(blob.data, "base64");
+
+  if (opts?.compressToJpeg) {
+    bytes = await sharp(bytes).jpeg({ quality: 82 }).toBuffer();
+    mime = "image/jpeg";
+  }
 
   const publicUrl = await _putBytesToR2Public({
     bytes,
@@ -2709,6 +2715,7 @@ async function runStillCreatePipeline({ supabase, generationId, passId, vars, pr
               useGoogleSearch: parseOptionalBool(process.env.MMA_MAIN_GEMINI_USE_GOOGLE_SEARCH),
               useImageSearch: parseOptionalBool(process.env.MMA_MAIN_GEMINI_USE_IMAGE_SEARCH),
               responseModalities: ["IMAGE"],
+              compressToJpeg: true,
             })
           : stillEngine === "nanobanana"
             ? await runNanoBanana({
@@ -2992,6 +2999,7 @@ async function runStillTweakPipeline({ supabase, generationId, passId, parent, v
               useGoogleSearch: parseOptionalBool(process.env.MMA_MAIN_GEMINI_USE_GOOGLE_SEARCH),
               useImageSearch: parseOptionalBool(process.env.MMA_MAIN_GEMINI_USE_IMAGE_SEARCH),
               responseModalities: ["IMAGE"],
+              compressToJpeg: true,
             })
           : stillEngine === "nanobanana"
             ? await runNanoBanana({
