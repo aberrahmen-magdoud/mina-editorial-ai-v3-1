@@ -104,6 +104,51 @@ function buildMagicUpscaleFallbackInput(input) {
 // intent, and produce a negative_prompt for unwanted elements.
 // Returns { prompt, negative_prompt }
 // ============================================================================
+// ============================================================================
+// GPT Vision: describe image + generate expansion prompt for Bria Expand
+// Returns { prompt, negative_prompt }
+// ============================================================================
+async function rewriteExpandPrompt(imageUrl) {
+  const openai = getOpenAI();
+
+  const systemPrompt = `You are an expert image analyst and art director. Given an image that needs to be expanded (outpainted) beyond its borders, analyze what is visible and produce a JSON object with exactly two keys:
+  "prompt" — a compact, highly-detailed description (max 80 words) of how the expanded area should look. Describe the continuation of the scene: background elements, surfaces, textures, lighting direction, color palette, and atmosphere that should seamlessly extend beyond the original borders. Be specific about materials and environment.
+  "negative_prompt" — a short list of things to avoid: "blur, distortion, artifacts, text, watermark, low quality, bad anatomy, inconsistent lighting, seams, visible borders, mismatched textures"
+Return ONLY the JSON object, no markdown, no explanation.`;
+
+  const resp = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      { role: "system", content: systemPrompt },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "Analyze this image and describe how it should be expanded beyond its borders:" },
+          { type: "image_url", image_url: { url: imageUrl, detail: "high" } },
+        ],
+      },
+    ],
+    max_tokens: 300,
+    temperature: 0.3,
+  });
+
+  const raw = (resp.choices?.[0]?.message?.content || "").trim();
+
+  try {
+    const cleaned = raw.replace(/^```(?:json)?\s*/, "").replace(/\s*```$/, "");
+    const parsed = JSON.parse(cleaned);
+    return {
+      prompt: String(parsed.prompt || "").trim(),
+      negative_prompt: String(parsed.negative_prompt || "blur, distortion, artifacts, text, watermark, low quality, bad anatomy, inconsistent lighting, seams, visible borders, mismatched textures").trim(),
+    };
+  } catch {
+    return {
+      prompt: raw || "seamless continuation of the scene with consistent lighting, textures, and atmosphere",
+      negative_prompt: "blur, distortion, artifacts, text, watermark, low quality, bad anatomy, inconsistent lighting, seams, visible borders, mismatched textures",
+    };
+  }
+}
+
 async function rewriteGenfillPrompt(userPrompt) {
   const openai = getOpenAI();
 
@@ -620,6 +665,40 @@ export async function handleFingertipsGenerate({ passId, modelKey, inputs }) {
       if (negative_prompt) cleanedInputs.negative_prompt = negative_prompt;
     } catch (err) {
       // Fallback: keep original user prompt if GPT rewriting fails.
+    }
+  }
+
+  // 3d. Bria Expand: GPT-describe image for expansion prompt + force 4K canvas + negative prompt.
+  if (modelKey === "expand") {
+    // Generate GPT context prompt describing how the expansion should look
+    try {
+      const { prompt, negative_prompt } = await rewriteExpandPrompt(cleanedInputs.image);
+      if (prompt) cleanedInputs.prompt = prompt;
+      if (negative_prompt) cleanedInputs.negative_prompt = negative_prompt;
+    } catch (err) {
+      // Fallback: generic expansion prompt + quality negative
+      cleanedInputs.prompt = cleanedInputs.prompt || "seamless continuation of the scene with consistent lighting, textures, and atmosphere";
+      cleanedInputs.negative_prompt = "blur, distortion, artifacts, text, watermark, low quality, bad anatomy, inconsistent lighting, seams, visible borders, mismatched textures";
+    }
+
+    // Force 4K output: convert aspect_ratio to explicit 4K canvas_size
+    if (cleanedInputs.aspect_ratio && !cleanedInputs.canvas_size) {
+      const FOUR_K_MAP = {
+        "1:1":   [3840, 3840],
+        "16:9":  [3840, 2160],
+        "9:16":  [2160, 3840],
+        "4:3":   [3840, 2880],
+        "3:4":   [2880, 3840],
+        "3:2":   [3840, 2560],
+        "2:3":   [2560, 3840],
+        "4:5":   [3072, 3840],
+        "5:4":   [3840, 3072],
+      };
+      const mapped = FOUR_K_MAP[cleanedInputs.aspect_ratio];
+      if (mapped) {
+        cleanedInputs.canvas_size = mapped;
+        delete cleanedInputs.aspect_ratio;
+      }
     }
   }
 
