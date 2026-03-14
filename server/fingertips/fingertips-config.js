@@ -60,10 +60,10 @@ export const FINGERTIPS_MODELS = {
   },
 
   remove_bg: {
-    replicateModel: "smoretalk/rembg-enhance:4067ee2a58f6c161d434a9c077cfa012820b8e076efa2772aa171e26557da919",
+    replicateModel: "men1scus/birefnet:f74986db0355b58403ed20963af156525e2891ea3c2d499bfbfb2a28cd87c5d7",
     costPerGeneration: 0.2, // 5 generations = 1 matcha
     label: "Remove Background",
-    description: "Remove backgrounds with enhanced quality and detail",
+    description: "Bilateral Reference high-resolution background removal",
     // Required: image
     inputSchema: {
       image: { type: "uri", required: true, description: "Source image URL (JPEG, PNG, WEBP)" },
