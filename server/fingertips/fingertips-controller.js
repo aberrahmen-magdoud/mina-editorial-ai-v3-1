@@ -100,16 +100,18 @@ function buildMagicUpscaleFallbackInput(input) {
 }
 
 // ============================================================================
-// GPT: rewrite flux-fill prompt with explicit KEEP vs CHANGE intent
+// GPT: rewrite flux-fill / bria genfill prompt with explicit KEEP vs CHANGE
+// intent, and produce a negative_prompt for unwanted elements.
+// Returns { prompt, negative_prompt }
 // ============================================================================
-async function rewriteFluxFillPrompt(userPrompt) {
+async function rewriteGenfillPrompt(userPrompt) {
   const openai = getOpenAI();
 
-  const systemPrompt = `You rewrite inpainting prompts for image editing. Produce one compact, highly-detailed prompt that clearly separates:
-1) what must stay unchanged in the original image, and
-2) what should be changed only in the masked area.
-Preserve composition, camera angle, lighting direction, perspective, and identity unless the user explicitly asks otherwise.
-Do not add markdown, labels, or explanations. Output only the final prompt text.`;
+  const systemPrompt = `You rewrite inpainting prompts for an AI image editor (Bria GenFill).
+Given the user's edit request, return a JSON object with exactly two keys:
+  "prompt" — a compact, highly-detailed positive prompt that describes what should appear in the masked area. Preserve composition, camera angle, lighting, perspective, and identity unless the user explicitly asks otherwise.
+  "negative_prompt" — a short list of things to avoid (artifacts, blur, distortion, unrelated objects, text, watermarks).
+Return ONLY the JSON object, no markdown, no explanation.`;
 
   const resp = await openai.chat.completions.create({
     model: "gpt-4o-mini",
@@ -117,16 +119,30 @@ Do not add markdown, labels, or explanations. Output only the final prompt text.
       { role: "system", content: systemPrompt },
       {
         role: "user",
-        content: `User edit request: ${String(userPrompt || "").trim()}
-
-Return a single detailed inpainting prompt with explicit keep-vs-change context.`,
+        content: `User edit request: ${String(userPrompt || "").trim()}`,
       },
     ],
-    max_tokens: 220,
+    max_tokens: 300,
     temperature: 0.3,
   });
 
-  return (resp.choices?.[0]?.message?.content || "").trim();
+  const raw = (resp.choices?.[0]?.message?.content || "").trim();
+
+  try {
+    // Strip markdown code fences if GPT wraps the JSON
+    const cleaned = raw.replace(/^```(?:json)?\s*/, "").replace(/\s*```$/, "");
+    const parsed = JSON.parse(cleaned);
+    return {
+      prompt: String(parsed.prompt || userPrompt || "").trim(),
+      negative_prompt: String(parsed.negative_prompt || "").trim(),
+    };
+  } catch {
+    // Fallback: treat entire response as prompt, use default negative
+    return {
+      prompt: raw || String(userPrompt || "").trim(),
+      negative_prompt: "blur, distortion, artifacts, text, watermark, low quality",
+    };
+  }
 }
 
 // ============================================================================
@@ -596,11 +612,12 @@ export async function handleFingertipsGenerate({ passId, modelKey, inputs }) {
     }
   }
 
-  // 3c. Flux fill: rewrite user prompt via GPT to include explicit keep/change context.
+  // 3c. Bria GenFill (flux_fill key): rewrite user prompt via GPT and generate negative_prompt.
   if (modelKey === "flux_fill" && cleanedInputs.prompt) {
     try {
-      const rewrittenPrompt = await rewriteFluxFillPrompt(cleanedInputs.prompt);
-      if (rewrittenPrompt) cleanedInputs.prompt = rewrittenPrompt;
+      const { prompt, negative_prompt } = await rewriteGenfillPrompt(cleanedInputs.prompt);
+      if (prompt) cleanedInputs.prompt = prompt;
+      if (negative_prompt) cleanedInputs.negative_prompt = negative_prompt;
     } catch (err) {
       // Fallback: keep original user prompt if GPT rewriting fails.
     }
