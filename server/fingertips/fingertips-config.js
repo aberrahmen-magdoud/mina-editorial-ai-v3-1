@@ -22,23 +22,21 @@ export const FINGERTIPS_MODELS = {
   },
 
   flux_fill: {
-    replicateModel: "black-forest-labs/flux-fill-dev",
+    replicateModel: "bria/genfill",
     costPerGeneration: 0.5,
-    label: "AI Fill (Inpaint/Outpaint)",
-    description: "Dev inpainting and outpainting with text-guided generation",
-    // Required: image, prompt. Optional: mask, seed, guidance, num_inference_steps, megapixels, num_outputs, output_format, output_quality, disable_safety_checker
+    label: "AI Fill (Inpaint)",
+    description: "Bria GenFill — text-guided inpainting with mask support",
+    // Required: image, prompt. Optional: mask, negative_prompt, seed, sync, content_moderation, mask_type, preserve_alpha
     inputSchema: {
-      prompt: { type: "string", required: true, description: "Prompt for generated image" },
-      image: { type: "uri", required: true, description: "The image to inpaint. If dimensions don't fit within 1440x1440, it will be scaled down to fit." },
-      mask: { type: "uri", required: false, description: "Black-and-white mask. Black = preserve, White = inpaint area." },
-      num_outputs: { type: "integer", required: false, default: 1, description: "Number of outputs to generate (1-4)" },
-      num_inference_steps: { type: "integer", required: false, default: 50, description: "Denoising steps. 28-50 recommended, higher = better quality (max 50)" },
-      guidance: { type: "number", required: false, default: 30, description: "Guidance for generated image (0-100)" },
-      seed: { type: "integer", required: false, description: "Random seed for reproducibility" },
-      megapixels: { type: "string", required: false, default: "match_input", description: "Approximate megapixels: 1, 0.25, or match_input (matches input size up to 1440x1440)" },
-      output_format: { type: "string", required: false, default: "png", description: "Output format: webp, jpg, png" },
-      output_quality: { type: "integer", required: false, default: 100, description: "Output quality 0-100 (not relevant for png)" },
-      disable_safety_checker: { type: "boolean", required: false, default: false, description: "Disable safety checker for generated images" },
+      image: { type: "uri", required: true, description: "Source image file (JPEG, PNG, WEBP)" },
+      mask: { type: "uri", required: false, description: "Mask file. White = area to fill, Black = keep." },
+      prompt: { type: "string", required: true, description: "Text prompt for image generation" },
+      negative_prompt: { type: "string", required: false, description: "Negative prompt for image generation" },
+      sync: { type: "boolean", required: false, default: true, description: "Synchronous response mode" },
+      seed: { type: "integer", required: false, description: "Random seed for reproducible generation" },
+      content_moderation: { type: "boolean", required: false, default: false, description: "Enable content moderation" },
+      mask_type: { type: "string", required: false, default: "manual", description: "Type of mask: manual or automatic" },
+      preserve_alpha: { type: "boolean", required: false, default: true, description: "Preserve alpha channel in output" },
     },
   },
 
