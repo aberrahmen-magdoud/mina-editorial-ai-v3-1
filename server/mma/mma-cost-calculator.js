@@ -16,9 +16,10 @@ const KLING_COSTS = {
     pro:      { perSecond: 0.112, withAudio: 0.14,  withVideo: 0.168 },
   },
   "kling-v3": {
-    // v3 uses omni pricing as fallback
-    standard: { perSecond: 0.084, withAudio: 0.112, withVideo: 0.126 },
-    pro:      { perSecond: 0.112, withAudio: 0.14,  withVideo: 0.168 },
+    // v3 is pricier than omni: standard $0.126/s, pro $0.168/s
+    // motion control surcharge: +$0.126/s (standard) or +$0.168/s (pro)
+    standard: { perSecond: 0.126, withAudio: 0.084, withVideo: 0.252 },
+    pro:      { perSecond: 0.168, withAudio: 0.112, withVideo: 0.336 },
   },
   "kling-v2.6": {
     // per-block pricing: standard 5s=$0.21, 10s=$0.42 ; pro 5s=$0.35, 10s=$0.70
@@ -26,9 +27,9 @@ const KLING_COSTS = {
     pro:      { perSecond: 0.07, withAudio: 0.168 },
   },
   "kling-v2.1": {
-    // pro 5s=$0.49, 10s=$0.98
+    // standard 5s=$0.28, 10s=$0.56 ; pro 5s=$0.49, 10s=$0.98
+    standard: { perSecond: 0.056 },
     pro:      { perSecond: 0.098 },
-    standard: { perSecond: 0.098 }, // fallback = pro
   },
 };
 
@@ -40,8 +41,8 @@ const FABRIC_COSTS = {
 };
 
 // --- Seedream (still image via Replicate) ---
-// Source: Replicate official model pricing ~$0.027/image
-const SEEDREAM_COST_PER_IMAGE = 0.027;
+// Source: Replicate/BytePlus pricing ~$0.03/image
+const SEEDREAM_COST_PER_IMAGE = 0.03;
 
 // --- Nanobanana / Gemini Flash Image (still image via Google Gemini API) ---
 // Source: Google AI pricing - $60/1M output tokens
