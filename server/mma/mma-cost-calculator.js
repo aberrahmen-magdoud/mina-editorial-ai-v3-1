@@ -16,10 +16,10 @@ const KLING_COSTS = {
     pro:      { perSecond: 0.112, withAudio: 0.14,  withVideo: 0.168 },
   },
   "kling-v3": {
-    // v3 is pricier than omni: standard $0.126/s, pro $0.168/s
-    // motion control surcharge: +$0.126/s (standard) or +$0.168/s (pro)
-    standard: { perSecond: 0.126, withAudio: 0.084, withVideo: 0.252 },
-    pro:      { perSecond: 0.168, withAudio: 0.112, withVideo: 0.336 },
+    // v3 Pro: 0.8 units/s (no audio), 1.2 units/s (audio) = 1.5x multiplier
+    // Verified from real Kling billing data (March 2026)
+    standard: { perSecond: 0.126, withAudio: 0.189, withVideo: 0.252 },
+    pro:      { perSecond: 0.168, withAudio: 0.252, withVideo: 0.336 },
   },
   "kling-v2.6": {
     // per-block pricing: standard 5s=$0.21, 10s=$0.42 ; pro 5s=$0.35, 10s=$0.70
