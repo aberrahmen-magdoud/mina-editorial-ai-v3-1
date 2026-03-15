@@ -8,18 +8,25 @@
 // ============================================================================
 
 // --- Kling Video (KlingAI HTTP API) ---
-// Source: https://klingai.com/global/dev/pricing
+// Source: Real billing data + $97.99 / 1000 units trial package
+// 1 Kling unit = $0.09799 USD
+const KLING_UNIT_PRICE_USD = 97.99 / 1000; // $0.09799/unit
+
 const KLING_COSTS = {
   // model -> mode -> { perSecond, withAudio?, withVideo? }
+  // Rates derived from billing: units/sec × KLING_UNIT_PRICE_USD
   "kling-v3-omni": {
+    // omni uses official listed rates (no billing data yet)
     standard: { perSecond: 0.084, withAudio: 0.112, withVideo: 0.126 },
     pro:      { perSecond: 0.112, withAudio: 0.14,  withVideo: 0.168 },
   },
   "kling-v3": {
-    // v3 Pro: 0.8 units/s (no audio), 1.2 units/s (audio) = 1.5x multiplier
-    // Verified from real Kling billing data (March 2026)
-    standard: { perSecond: 0.126, withAudio: 0.189, withVideo: 0.252 },
-    pro:      { perSecond: 0.168, withAudio: 0.252, withVideo: 0.336 },
+    // Verified from real Kling billing (March 2026):
+    // Pro sound-off: 0.8 units/s → $0.0784/s
+    // Pro sound-on:  1.2 units/s → $0.1176/s (1.5x base)
+    // Standard estimated at 75% of pro rates
+    standard: { perSecond: 0.0588, withAudio: 0.0882, withVideo: 0.1176 },
+    pro:      { perSecond: 0.0784, withAudio: 0.1176, withVideo: 0.1568 },
   },
   "kling-v2.6": {
     // per-block pricing: standard 5s=$0.21, 10s=$0.42 ; pro 5s=$0.35, 10s=$0.70
@@ -77,6 +84,37 @@ const FINGERTIPS_API_COSTS = {
   upscale:    0.03,    // crystal or magic upscaler ~$0.02-0.04/run
   vectorize:  0.01,    // recraft-vectorize ~$0.01/run
 };
+
+// ============================================================================
+// FIXED MONTHLY COSTS (infrastructure + subscriptions, USD)
+// ============================================================================
+const FIXED_MONTHLY_COSTS = {
+  // --- Infrastructure ---
+  render_frontend:    0,       // static site (free tier)
+  render_backend:     7,       // Starter plan
+  cloudflare_r2:      0,       // free tier for small storage
+  supabase:           25,      // Pro plan
+
+  // --- AI Subscriptions (development & prompt engineering) ---
+  chatgpt_pro:        200,     // ChatGPT Pro ($200/mo)
+  claude_max:         200,     // Claude Max 20x ($200/mo)
+  github_copilot:     10,      // Copilot Pro ($10/mo)
+
+  // --- AI API subscriptions ---
+  google_ai_pro:      19.99,   // Gemini Pro consumer plan ($19.99/mo)
+  kling_package:      97.99,   // Trial-Video-1000Units ($97.99/mo)
+
+  // --- Pay-as-you-go (estimated monthly spend) ---
+  replicate:          40,      // ~$40/mo estimated (Seedream, Bria, birefnet, etc.)
+};
+
+const TOTAL_FIXED_MONTHLY = Object.values(FIXED_MONTHLY_COSTS).reduce((a, b) => a + b, 0);
+
+// Estimated generations per month (used to amortize fixed costs)
+const EST_GENERATIONS_PER_MONTH = Number(process.env.MINA_EST_GENERATIONS_PER_MONTH || 1000);
+
+// Fixed overhead amortized per generation
+const FIXED_COST_PER_GENERATION = TOTAL_FIXED_MONTHLY / EST_GENERATIONS_PER_MONTH;
 
 // ============================================================================
 // SELL PRICE (what we charge users in USD per matcha)
@@ -237,17 +275,25 @@ export function estimateGenerationCost(opts = {}) {
   }
 
   totalCost = round(modelCost + gptCost);
+  const fixedOverhead = round(FIXED_COST_PER_GENERATION);
+  const totalCostWithFixed = round(totalCost + fixedOverhead);
   sellPrice = round(matchasCharged * MATCHA_SELL_PRICE_USD);
   profit = round(sellPrice - totalCost);
+  const profitAfterFixed = round(sellPrice - totalCostWithFixed);
 
   return {
     api_cost_usd: totalCost,
     model_cost_usd: modelCost,
     gpt_cost_usd: gptCost,
+    fixed_overhead_usd: fixedOverhead,
+    total_cost_usd: totalCostWithFixed,
     sell_price_usd: sellPrice,
     profit_usd: profit,
+    profit_after_fixed_usd: profitAfterFixed,
     matchas_charged: matchasCharged,
     matcha_unit_price_usd: MATCHA_SELL_PRICE_USD,
+    fixed_monthly_total_usd: TOTAL_FIXED_MONTHLY,
+    est_generations_per_month: EST_GENERATIONS_PER_MONTH,
     ...costBreakdown,
   };
 }
@@ -258,6 +304,18 @@ export function estimateGenerationCost(opts = {}) {
 
 function round(n) {
   return Math.round(n * 100000) / 100000; // 5 decimal places for small costs
+}
+
+/**
+ * Return the full fixed monthly cost breakdown.
+ */
+export function getFixedCostBreakdown() {
+  return {
+    monthly_costs: { ...FIXED_MONTHLY_COSTS },
+    total_monthly_usd: round(TOTAL_FIXED_MONTHLY),
+    est_generations_per_month: EST_GENERATIONS_PER_MONTH,
+    fixed_per_generation_usd: round(FIXED_COST_PER_GENERATION),
+  };
 }
 
 /**
