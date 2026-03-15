@@ -33,6 +33,12 @@ import { replicatePredictWithTimeout } from "./replicate-poll.js";
 import { estimateGenerationCost, costParamsFromVars } from "./mma-cost-calculator.js";
 
 // ============================================================================
+// DEFAULT NEGATIVE PROMPT (always sent to Kling unless overridden)
+// ============================================================================
+const KLING_DEFAULT_NEGATIVE_PROMPT =
+  "morphing, distorted hands, extra fingers, flickering textures, blurry text, cartoonish, low resolution";
+
+// ============================================================================
 // USER-FACING TEXT (EDIT THESE)
 // - The ONLY place you should tweak wording
 // - These lines are what the frontend will see as the SSE status text
@@ -1749,11 +1755,11 @@ async function runKling({
 
   const finalNeg =
     negativePrompt !== undefined
-      ? safeStr(negativePrompt, "")
+      ? safeStr(negativePrompt, KLING_DEFAULT_NEGATIVE_PROMPT)
       : safeStr(
           process.env.NEGATIVE_PROMPT_KLING || process.env.MMA_NEGATIVE_PROMPT_KLING || cfg?.kling?.negativePrompt,
           ""
-        );
+        ) || KLING_DEFAULT_NEGATIVE_PROMPT;
 
   const finalPrompt = safeStr(prompt, "");
   if (!finalPrompt) throw new Error("MISSING_KLING_PROMPT");
@@ -3381,7 +3387,7 @@ const usePromptOverride = !!promptOverride;
       cfg?.kling?.negativePrompt ||
       process.env.NEGATIVE_PROMPT_KLING ||
       process.env.MMA_NEGATIVE_PROMPT_KLING ||
-      "";
+      KLING_DEFAULT_NEGATIVE_PROMPT;
 
     const generateAudioRaw =
       working?.inputs?.generate_audio ??
@@ -3715,7 +3721,7 @@ async function runVideoTweakPipeline({ supabase, generationId, passId, parent, v
       cfg?.kling?.negativePrompt ||
       process.env.NEGATIVE_PROMPT_KLING ||
       process.env.MMA_NEGATIVE_PROMPT_KLING ||
-      "";
+      KLING_DEFAULT_NEGATIVE_PROMPT;
 
     const mergedInputsAudio = { ...(parentVars?.inputs || {}), ...(working?.inputs || {}) };
 
