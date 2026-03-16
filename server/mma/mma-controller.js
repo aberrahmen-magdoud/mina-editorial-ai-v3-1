@@ -3461,8 +3461,8 @@ const usePromptOverride = !!promptOverride;
       generateAudio = true;
     }
 
-    // 2-frame video stays muted
-    if (asHttpUrl(endImage)) generateAudio = false;
+    // Note: kling-v3 supports native audio with image_tail (start+end frame).
+    // Only force mute if the user explicitly muted, not just because end image exists.
 
     let genRes;
     let stepType = "kling_generate";
@@ -3548,7 +3548,37 @@ const usePromptOverride = !!promptOverride;
       payload: { input, output: out, timing, error: null },
     });
 
-    const remote = pickFirstUrl(out);
+    let remote = pickFirstUrl(out);
+
+    // Fallback: if 2-frame video returned no URL, retry without image_tail
+    if (!remote && asHttpUrl(endImage) && stepType === "kling_generate") {
+      console.warn(`[mma] VIDEO_NO_URL with image_tail — retrying without end frame (${generationId})`);
+      working = pushUserMessageLine(working, "something broke and i am choosing to call it a plot twist");
+      await updateVars({ supabase, generationId, vars: working });
+      emitLine(generationId, working);
+
+      const retryRes = await runKling({
+        prompt: finalMotionPrompt,
+        startImage,
+        endImage: null, // drop end frame
+        duration,
+        mode,
+        negativePrompt: neg,
+        generateAudio,
+      });
+
+      await writeStep({
+        supabase,
+        generationId,
+        passId,
+        stepNo: stepNo++,
+        stepType: "kling_generate_retry_no_tail",
+        payload: { input: retryRes.input, output: retryRes.out, timing: retryRes.timing, error: null },
+      });
+
+      remote = pickFirstUrl(retryRes.out);
+    }
+
     if (!remote) {
       const err = new Error("VIDEO_NO_URL");
       err.code = "VIDEO_NO_URL";
@@ -3801,8 +3831,8 @@ async function runVideoTweakPipeline({ supabase, generationId, passId, parent, v
       muteParsed !== undefined ? !muteParsed :
       true;
 
-    // ✅ 2 frames => force mute
-    if (asHttpUrl(endImage)) generateAudio = false;
+    // Note: kling-v3 supports native audio with image_tail (start+end frame).
+    // Only force mute if the user explicitly muted, not just because end image exists.
 
     let genRes;
     let stepType = "kling_generate_tweak";
