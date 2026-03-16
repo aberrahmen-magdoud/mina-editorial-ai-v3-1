@@ -262,6 +262,7 @@ router.get("/", requireAuth, async (req, res) => {
       <input type="text" name="limit" value="${escapeHtml(String(limit))}" style="width:90px;" />
       <button class="btn" type="submit">Apply</button>
       <a class="btn" href="/admin/mma" style="display:inline-block;">Reset</a>
+      <a class="btn" href="/admin/mma/session-costs" style="display:inline-block; background:#f0f7ff;">Session Costs</a>
     </form>
 
     <table>
@@ -415,6 +416,243 @@ router.get("/generation/:id", requireAuth, async (req, res) => {
   );
 
   res.status(200).send(html);
+});
+
+// ---- Session Costs ----
+router.get("/session-costs", requireAuth, async (req, res) => {
+  const supabase = getSupabaseAdmin();
+  if (!supabase) {
+    return res.status(500).send(layout("Error", `<div class="err">SUPABASE_NOT_CONFIGURED</div>`));
+  }
+
+  const sessionId = (req.query.sessionId ? String(req.query.sessionId) : "").trim();
+  const passId = (req.query.passId ? String(req.query.passId) : "").trim();
+  const dateFrom = (req.query.from ? String(req.query.from) : "").trim();
+  const dateTo = (req.query.to ? String(req.query.to) : "").trim();
+  const limit = Math.max(1, Math.min(5000, Number(req.query.limit || 500) || 500));
+
+  let q = supabase
+    .from("mega_generations")
+    .select(
+      "mg_generation_id, mg_session_id, mg_pass_id, mg_mma_mode, mg_mma_status, mg_cost_data, mg_delta, mg_created_at"
+    )
+    .eq("mg_record_type", "generation")
+    .order("mg_created_at", { ascending: false })
+    .limit(limit);
+
+  if (sessionId) q = q.eq("mg_session_id", sessionId);
+  if (passId) q = q.eq("mg_pass_id", passId);
+  if (dateFrom) q = q.gte("mg_created_at", dateFrom);
+  if (dateTo) q = q.lte("mg_created_at", dateTo + "T23:59:59Z");
+
+  const { data, error } = await q;
+  if (error) {
+    return res.status(500).send(layout("Error", `<div class="err">${escapeHtml(error.message)}</div>`));
+  }
+
+  const gens = data || [];
+
+  // Aggregate by session
+  const sessionMap = new Map();
+  for (const g of gens) {
+    const sid = g.mg_session_id || "unknown";
+    if (!sessionMap.has(sid)) {
+      sessionMap.set(sid, {
+        session_id: sid,
+        count: 0,
+        stills: 0,
+        videos: 0,
+        total_api_cost: 0,
+        total_cost_with_fixed: 0,
+        total_sell_price: 0,
+        total_profit: 0,
+        total_profit_after_fixed: 0,
+        total_matchas: 0,
+        first_gen: null,
+        last_gen: null,
+      });
+    }
+    const s = sessionMap.get(sid);
+    s.count++;
+    if (g.mg_mma_mode === "still") s.stills++;
+    else if (g.mg_mma_mode === "video") s.videos++;
+
+    const c = g.mg_cost_data || {};
+    s.total_api_cost += c.api_cost_usd || 0;
+    s.total_cost_with_fixed += c.total_cost_usd || 0;
+    s.total_sell_price += c.sell_price_usd || 0;
+    s.total_profit += c.profit_usd || 0;
+    s.total_profit_after_fixed += c.profit_after_fixed_usd || 0;
+    s.total_matchas += c.matchas_charged || 0;
+
+    const ts = g.mg_created_at || "";
+    if (!s.first_gen || ts < s.first_gen) s.first_gen = ts;
+    if (!s.last_gen || ts > s.last_gen) s.last_gen = ts;
+  }
+
+  // Grand totals
+  let grandApi = 0, grandFixed = 0, grandSell = 0, grandProfit = 0, grandProfitFixed = 0, grandMatchas = 0, grandCount = 0;
+  for (const s of sessionMap.values()) {
+    grandApi += s.total_api_cost;
+    grandFixed += s.total_cost_with_fixed;
+    grandSell += s.total_sell_price;
+    grandProfit += s.total_profit;
+    grandProfitFixed += s.total_profit_after_fixed;
+    grandMatchas += s.total_matchas;
+    grandCount += s.count;
+  }
+
+  const usd = (n) => `$${n.toFixed(2)}`;
+  const sessions = [...sessionMap.values()].sort((a, b) => (b.last_gen || "").localeCompare(a.last_gen || ""));
+
+  const sessionRows = sessions.map((s) => `
+    <tr>
+      <td class="mono">${escapeHtml(s.session_id)}</td>
+      <td>${s.count}</td>
+      <td>${s.stills} / ${s.videos}</td>
+      <td>${s.total_matchas}</td>
+      <td class="mono">${usd(s.total_api_cost)}</td>
+      <td class="mono">${usd(s.total_cost_with_fixed)}</td>
+      <td class="mono">${usd(s.total_sell_price)}</td>
+      <td class="mono" style="color:${s.total_profit >= 0 ? '#1a7f37' : '#b00020'}">${usd(s.total_profit)}</td>
+      <td class="mono" style="color:${s.total_profit_after_fixed >= 0 ? '#1a7f37' : '#b00020'}">${usd(s.total_profit_after_fixed)}</td>
+      <td class="mono">${escapeHtml((s.first_gen || "").slice(0, 16))}</td>
+      <td class="mono">${escapeHtml((s.last_gen || "").slice(0, 16))}</td>
+    </tr>
+  `);
+
+  const html = layout(
+    "Session Costs",
+    `
+    <div class="topbar">
+      <div>
+        <a href="/admin/mma">&larr; Back to Generations</a>
+        <h2 style="margin:8px 0 0 0;">Session Costs</h2>
+        <div class="muted">Aggregated provider costs per session from mg_cost_data</div>
+      </div>
+      <form method="POST" action="/admin/mma/logout" style="margin:0;">
+        <button class="btn" type="submit">Logout</button>
+      </form>
+    </div>
+
+    <form method="GET" action="/admin/mma/session-costs" style="margin: 0 0 16px 0; display:flex; gap:8px; flex-wrap:wrap; align-items:end;">
+      <div>
+        <label class="muted" style="font-size:11px;">Session ID</label><br/>
+        <input type="text" name="sessionId" value="${escapeHtml(sessionId)}" placeholder="Filter by session" style="width:220px;" />
+      </div>
+      <div>
+        <label class="muted" style="font-size:11px;">Pass ID</label><br/>
+        <input type="text" name="passId" value="${escapeHtml(passId)}" placeholder="Filter by pass" style="width:180px;" />
+      </div>
+      <div>
+        <label class="muted" style="font-size:11px;">From</label><br/>
+        <input type="text" name="from" value="${escapeHtml(dateFrom)}" placeholder="YYYY-MM-DD" style="width:130px;" />
+      </div>
+      <div>
+        <label class="muted" style="font-size:11px;">To</label><br/>
+        <input type="text" name="to" value="${escapeHtml(dateTo)}" placeholder="YYYY-MM-DD" style="width:130px;" />
+      </div>
+      <div>
+        <label class="muted" style="font-size:11px;">Limit</label><br/>
+        <input type="text" name="limit" value="${escapeHtml(String(limit))}" style="width:70px;" />
+      </div>
+      <button class="btn" type="submit">Apply</button>
+      <a class="btn" href="/admin/mma/session-costs" style="display:inline-block;">Reset</a>
+    </form>
+
+    <div class="row" style="margin-bottom:16px;">
+      <div class="card">
+        <div class="muted" style="font-size:11px;">GRAND TOTALS (${grandCount} generations across ${sessionMap.size} sessions)</div>
+        <div style="display:flex; gap:24px; flex-wrap:wrap; margin-top:8px;">
+          <div><b>Matchas:</b> ${grandMatchas}</div>
+          <div><b>Provider:</b> ${usd(grandApi)}</div>
+          <div><b>With Fixed:</b> ${usd(grandFixed)}</div>
+          <div><b>Revenue:</b> ${usd(grandSell)}</div>
+          <div style="color:${grandProfit >= 0 ? '#1a7f37' : '#b00020'}"><b>Profit:</b> ${usd(grandProfit)}</div>
+          <div style="color:${grandProfitFixed >= 0 ? '#1a7f37' : '#b00020'}"><b>Profit (w/ fixed):</b> ${usd(grandProfitFixed)}</div>
+        </div>
+      </div>
+    </div>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Session</th>
+          <th>Gens</th>
+          <th>Still/Video</th>
+          <th>Matchas</th>
+          <th>Provider $</th>
+          <th>Total $ (w/ fixed)</th>
+          <th>Revenue $</th>
+          <th>Profit $</th>
+          <th>Profit (w/ fixed)</th>
+          <th>First</th>
+          <th>Last</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${sessionRows.join("\n")}
+      </tbody>
+    </table>
+  `
+  );
+
+  res.status(200).send(html);
+});
+
+// ---- Session Costs JSON API ----
+router.get("/session-costs.json", requireAuth, async (req, res) => {
+  const supabase = getSupabaseAdmin();
+  if (!supabase) return res.status(500).json({ ok: false, error: "SUPABASE_NOT_CONFIGURED" });
+
+  const sessionId = (req.query.sessionId ? String(req.query.sessionId) : "").trim();
+  const passId = (req.query.passId ? String(req.query.passId) : "").trim();
+  const dateFrom = (req.query.from ? String(req.query.from) : "").trim();
+  const dateTo = (req.query.to ? String(req.query.to) : "").trim();
+  const limit = Math.max(1, Math.min(5000, Number(req.query.limit || 500) || 500));
+
+  let q = supabase
+    .from("mega_generations")
+    .select(
+      "mg_generation_id, mg_session_id, mg_pass_id, mg_mma_mode, mg_cost_data, mg_delta, mg_created_at"
+    )
+    .eq("mg_record_type", "generation")
+    .order("mg_created_at", { ascending: false })
+    .limit(limit);
+
+  if (sessionId) q = q.eq("mg_session_id", sessionId);
+  if (passId) q = q.eq("mg_pass_id", passId);
+  if (dateFrom) q = q.gte("mg_created_at", dateFrom);
+  if (dateTo) q = q.lte("mg_created_at", dateTo + "T23:59:59Z");
+
+  const { data, error } = await q;
+  if (error) return res.status(500).json({ ok: false, error: error.message });
+
+  const gens = data || [];
+  const sessionMap = new Map();
+  for (const g of gens) {
+    const sid = g.mg_session_id || "unknown";
+    if (!sessionMap.has(sid)) {
+      sessionMap.set(sid, {
+        session_id: sid, count: 0, stills: 0, videos: 0,
+        total_api_cost: 0, total_cost_with_fixed: 0, total_sell_price: 0,
+        total_profit: 0, total_profit_after_fixed: 0, total_matchas: 0,
+      });
+    }
+    const s = sessionMap.get(sid);
+    s.count++;
+    if (g.mg_mma_mode === "still") s.stills++;
+    else if (g.mg_mma_mode === "video") s.videos++;
+    const c = g.mg_cost_data || {};
+    s.total_api_cost += c.api_cost_usd || 0;
+    s.total_cost_with_fixed += c.total_cost_usd || 0;
+    s.total_sell_price += c.sell_price_usd || 0;
+    s.total_profit += c.profit_usd || 0;
+    s.total_profit_after_fixed += c.profit_after_fixed_usd || 0;
+    s.total_matchas += c.matchas_charged || 0;
+  }
+
+  return res.json({ ok: true, sessions: [...sessionMap.values()], total_generations: gens.length });
 });
 
 router.get("/generation/:id.json", requireAuth, async (req, res) => {
