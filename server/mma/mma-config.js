@@ -218,6 +218,7 @@ export function getMmaConfig() {
       mode: klingMode,
       duration: klingDuration,
       negativePrompt: negativeKling,
+      videoLane: pickEnv(["MMA_VIDEO_LANE", "MMA_KLING_VIDEO_LANE"], "short"), // "short" | "story"
     },
   };
 }

@@ -3471,7 +3471,7 @@ const usePromptOverride = !!promptOverride;
     if (one.duration) working.prompts = { ...(working.prompts || {}), gpt_duration: one.duration };
   }
 
-  // If GPT returns empty, do a safe fallback so Fabric never fails because of prompt
+  // If GPT returns empty, do a safe fallback so audio-ref flow never fails because of prompt
   if (!finalMotionPrompt) {
     finalMotionPrompt =
       safeStr(motionBrief, "") ||
@@ -3480,7 +3480,7 @@ const usePromptOverride = !!promptOverride;
   }
 
   // Only REQUIRE prompt for Kling and motion-control (Fabric doesn’t need it)
-  if (!finalMotionPrompt && flow !== "fabric_audio") {
+  if (!finalMotionPrompt && flow !== "kling_omni_audio") {
     throw new Error("EMPTY_MOTION_PROMPT");
   }
 
@@ -3834,11 +3834,11 @@ async function runVideoTweakPipeline({ supabase, generationId, passId, parent, v
     let finalMotionPrompt = safeStr(one.motion_prompt, "");
 
     if (!finalMotionPrompt) {
-      // safe fallback (so Fabric tweak won’t fail just because GPT output is empty)
+      // safe fallback (so audio-ref tweak won’t fail just because GPT output is empty)
       finalMotionPrompt = safeStr(feedbackMotion, "") || safeStr(prevMotionPrompt, "");
     }
 
-    if (!finalMotionPrompt && pricing.flow !== "fabric_audio") {
+    if (!finalMotionPrompt && pricing.flow !== "kling_omni_audio") {
       throw new Error("EMPTY_MOTION_TWEAK_PROMPT_ONE_SHOT");
     }
 
