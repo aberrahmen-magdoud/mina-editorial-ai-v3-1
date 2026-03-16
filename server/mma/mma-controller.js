@@ -860,6 +860,7 @@ function pickFirstUrl(output) {
         "image",
         "images",
         "video",
+        "videos",
         "video_url",
         "videoUrl",
         "mp4",
@@ -1585,6 +1586,26 @@ function extractKlingTaskStatusMsg(payload) {
   return safeStr(payload?.data?.task_status_msg, "") || safeStr(payload?.message, "");
 }
 
+/** Returns true when the Kling response actually contains a video URL */
+function klingResultHasVideo(payload) {
+  const tr = payload?.data?.task_result;
+  if (!tr || typeof tr !== "object") return false;
+  const videos = tr.videos;
+  if (Array.isArray(videos) && videos.length > 0) {
+    return videos.some((v) => typeof v?.url === "string" && v.url.startsWith("http"));
+  }
+  // fallback: walk top-level values for any URL string
+  for (const val of Object.values(tr)) {
+    if (typeof val === "string" && /^https?:\/\//i.test(val)) return true;
+    if (Array.isArray(val)) {
+      for (const item of val) {
+        if (typeof item?.url === "string" && item.url.startsWith("http")) return true;
+      }
+    }
+  }
+  return false;
+}
+
 function extractKlingVideoUrl(payload) {
   return safeStr(payload?.data?.task_result?.videos?.[0]?.url, "");
 }
@@ -1694,11 +1715,34 @@ async function submitAndPollKlingTask({
   const maxMs = Math.max(5000, Number(timeoutMs || 900000) || 900000);
   const waitMs = Math.max(1000, Number(pollMs || 2500) || 2500);
 
+  // How many extra GETs to try when Kling says "succeed" but task_result is empty
+  const SUCCEED_EMPTY_RETRIES = 4;
+  const SUCCEED_EMPTY_WAIT_MS = 3000;
+
   while (true) {
     const status = extractKlingTaskStatus(final);
 
     if (status === "succeed") {
-      return { created, final, taskId, timedOut: false };
+      // Kling sometimes returns "succeed" before task_result.videos is populated.
+      // Retry the GET a few times to let it settle.
+      if (klingResultHasVideo(final)) {
+        return { created, final, taskId, timedOut: false };
+      }
+
+      let retryFinal = final;
+      for (let i = 0; i < SUCCEED_EMPTY_RETRIES; i++) {
+        await sleepMs(SUCCEED_EMPTY_WAIT_MS);
+        retryFinal = await klingRequestJson(queryPathFromTaskId(taskId), {
+          method: "GET",
+          timeoutMs: REPLICATE_CALL_TIMEOUT_MS,
+        });
+        if (klingResultHasVideo(retryFinal)) {
+          return { created, final: retryFinal, taskId, timedOut: false };
+        }
+      }
+
+      // Still no video — return what we have (will trigger VIDEO_NO_URL downstream)
+      return { created, final: retryFinal, taskId, timedOut: false };
     }
 
     if (status === "failed") {
@@ -3505,7 +3549,18 @@ const usePromptOverride = !!promptOverride;
     });
 
     const remote = pickFirstUrl(out);
-    if (!remote) throw new Error("VIDEO_NO_URL");
+    if (!remote) {
+      const err = new Error("VIDEO_NO_URL");
+      err.code = "VIDEO_NO_URL";
+      err.details = {
+        prediction_id: genRes.prediction_id,
+        prediction_status: genRes.prediction_status,
+        timed_out: genRes.timed_out,
+        task_result_keys: out ? Object.keys(out) : [],
+        raw_out: JSON.stringify(out)?.slice(0, 500),
+      };
+      throw err;
+    }
 
     const remoteUrl = await storeRemoteToR2Public(remote, `mma/video/${generationId}`);
 
@@ -3809,7 +3864,18 @@ async function runVideoTweakPipeline({ supabase, generationId, passId, parent, v
     });
 
     const remote = pickFirstUrl(out);
-    if (!remote) throw new Error("KLING_NO_URL_TWEAK");
+    if (!remote) {
+      const err = new Error("KLING_NO_URL_TWEAK");
+      err.code = "KLING_NO_URL_TWEAK";
+      err.details = {
+        prediction_id: genRes.prediction_id,
+        prediction_status: genRes.prediction_status,
+        timed_out: genRes.timed_out,
+        task_result_keys: out ? Object.keys(out) : [],
+        raw_out: JSON.stringify(out)?.slice(0, 500),
+      };
+      throw err;
+    }
 
     const remoteUrl = await storeRemoteToR2Public(remote, `mma/video/${generationId}`);
 
