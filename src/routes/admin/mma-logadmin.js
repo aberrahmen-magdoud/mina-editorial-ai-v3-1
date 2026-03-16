@@ -120,6 +120,11 @@ function isAuthed(req) {
 
 function requireAuth(req, res, next) {
   if (isAuthed(req)) return next();
+  // Return 401 JSON for API/fetch requests, redirect for browser navigation
+  const accept = String(req.headers.accept || "");
+  if (req.path.startsWith("/api/") || accept.includes("application/json")) {
+    return res.status(401).json({ ok: false, error: "Not authenticated" });
+  }
   return res.redirect("/admin/mma/login");
 }
 
@@ -376,16 +381,19 @@ router.get("/", requireAuth, async (req, res) => {
       if (cursor) params.set('cursor', cursor);
 
       try {
-        const r = await fetch('/admin/mma/api/generations?' + params);
+        const r = await fetch('/admin/mma/api/generations?' + params, { credentials: 'same-origin' });
+        if (r.status === 401) { window.location.href = '/admin/mma/login'; return; }
+        if (!r.ok) { loading = false; document.getElementById('loadMore').innerHTML = '<span class="muted" style="font-size:11px;color:#b00020;">Error loading (status ' + r.status + ')</span>'; return; }
         const j = await r.json();
-        if (!j.ok) { loading = false; return; }
+        if (!j.ok) { loading = false; document.getElementById('loadMore').innerHTML = '<span class="muted" style="font-size:11px;color:#b00020;">API error: ' + esc(j.error||'unknown') + '</span>'; return; }
         items = items.concat(j.items);
         cursor = j.nextCursor;
         if (!j.nextCursor) exhausted = true;
         renderItems(j.items);
         document.getElementById('genCount').textContent = items.length + ' generations';
         document.getElementById('loadMore').style.display = exhausted ? 'none' : 'block';
-      } catch(e) { console.error(e); }
+        if (!j.items.length && !items.length) { document.getElementById('loadMore').innerHTML = '<span class="muted" style="font-size:11px;">No generations found</span>'; }
+      } catch(e) { console.error(e); document.getElementById('loadMore').innerHTML = '<span class="muted" style="font-size:11px;color:#b00020;">Network error — check console</span>'; }
       loading = false;
     }
 
