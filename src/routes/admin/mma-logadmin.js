@@ -123,7 +123,7 @@ function requireAuth(req, res, next) {
   return res.redirect("/admin/mma/login");
 }
 
-function layout(title, bodyHtml) {
+function layout(title, bodyHtml, extra = "") {
   return `<!doctype html>
 <html>
 <head>
@@ -131,26 +131,87 @@ function layout(title, bodyHtml) {
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>${escapeHtml(title)}</title>
   <style>
-    body { font-family: ui-sans-serif, system-ui, -apple-system; margin: 24px; color: #111; }
+    :root { --bg: #faf9f6; --text: #080a00; --muted: rgba(8,10,0,0.55); --border: rgba(8,10,0,0.08); --accent: #0b57d0; }
+    * { box-sizing: border-box; }
+    body { font-family: ui-sans-serif, system-ui, -apple-system; margin: 0; padding: 20px 24px; color: var(--text); background: var(--bg); }
     .topbar { display:flex; gap:12px; align-items:center; justify-content:space-between; margin-bottom:16px; }
-    .btn { border:1px solid #ddd; background:#fff; padding:8px 12px; border-radius:10px; cursor:pointer; }
-    .btn:hover { background:#f7f7f7; }
-    .muted { color:#666; }
+    .btn { border:1px solid var(--border); background:#fff; padding:7px 14px; border-radius:0; cursor:pointer; font-size:12px; font-weight:600; letter-spacing:0.02em; text-transform:uppercase; }
+    .btn:hover { background:rgba(8,10,0,0.04); }
+    .btn--accent { background:var(--accent); color:#fff; border-color:var(--accent); }
+    .btn--accent:hover { opacity:0.9; }
+    .muted { color: var(--muted); }
     table { width:100%; border-collapse: collapse; }
-    th, td { border-bottom: 1px solid #eee; padding: 10px 8px; vertical-align: top; }
-    th { text-align:left; font-size:12px; color:#666; }
-    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12px; white-space: pre-wrap; }
-    .tag { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; border:1px solid #ddd; }
+    th, td { border-bottom: 1px solid var(--border); padding: 10px 8px; vertical-align: top; }
+    th { text-align:left; font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:0.06em; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size:11px; white-space: pre-wrap; }
+    .tag { display:inline-block; padding:2px 8px; border-radius:0; font-size:10px; border:1px solid var(--border); text-transform:uppercase; letter-spacing:0.04em; font-weight:600; }
+    .tag--ok { border-color:#1a7f37; color:#1a7f37; }
+    .tag--err { border-color:#b00020; color:#b00020; }
+    .tag--video { border-color:#7c3aed; color:#7c3aed; }
+    .tag--still { border-color:var(--accent); color:var(--accent); }
     .bad { border-color:#ffb3b3; background:#fff5f5; }
-    details { border:1px solid #eee; border-radius:12px; padding:10px; margin:10px 0; }
-    summary { cursor:pointer; font-weight:600; }
+    details { border:1px solid var(--border); padding:10px; margin:10px 0; }
+    summary { cursor:pointer; font-weight:600; font-size:12px; }
     .row { display:flex; gap:16px; flex-wrap:wrap; }
-    .card { border:1px solid #eee; border-radius:12px; padding:12px; min-width:320px; flex:1; }
-    input[type="text"], input[type="password"] { padding:10px; border:1px solid #ddd; border-radius:10px; width: 320px; }
+    .card { border:1px solid var(--border); padding:14px; min-width:320px; flex:1; }
+    input[type="text"], input[type="password"] { padding:8px 10px; border:1px solid var(--border); border-radius:0; width: 320px; font-size:13px; background:#fff; }
+    input:focus { outline:2px solid var(--accent); outline-offset:-1px; }
     .err { color:#b00020; }
-    a { color:#0b57d0; text-decoration:none; }
+    a { color:var(--accent); text-decoration:none; }
     a:hover { text-decoration:underline; }
+
+    /* ---- Grid ---- */
+    .gen-grid { display:grid; grid-template-columns:repeat(16,1fr); gap:3px; margin-top:12px; }
+    @media(max-width:1400px){ .gen-grid { grid-template-columns:repeat(12,1fr); } }
+    @media(max-width:1000px){ .gen-grid { grid-template-columns:repeat(8,1fr); } }
+    @media(max-width:600px){ .gen-grid { grid-template-columns:repeat(4,1fr); } }
+
+    .gen-cell { position:relative; aspect-ratio:1; overflow:hidden; cursor:pointer; background:rgba(8,10,0,0.04); }
+    .gen-cell img, .gen-cell video { width:100%; height:100%; object-fit:cover; display:block; transition:transform 180ms ease; }
+    .gen-cell:hover img, .gen-cell:hover video { transform:scale(1.06); }
+    .gen-cell .gen-badge { position:absolute; top:3px; right:3px; font-size:8px; padding:1px 4px; background:rgba(0,0,0,0.6); color:#fff; text-transform:uppercase; font-weight:700; letter-spacing:0.04em; pointer-events:none; }
+    .gen-cell .gen-badge--video { background:rgba(124,58,237,0.85); }
+    .gen-cell .gen-status { position:absolute; bottom:3px; left:3px; font-size:7px; padding:1px 3px; background:rgba(0,0,0,0.55); color:#fff; text-transform:uppercase; font-weight:600; pointer-events:none; }
+    .gen-cell .gen-status--err { background:rgba(176,0,32,0.8); }
+    .gen-cell--empty { display:flex; align-items:center; justify-content:center; }
+    .gen-cell--empty span { font-size:9px; color:var(--muted); text-align:center; padding:4px; }
+
+    /* ---- Lightbox ---- */
+    .lb-backdrop { position:fixed; inset:0; z-index:998; background:rgba(0,0,0,0.88); animation:lb-in 200ms ease forwards; }
+    .lb { position:fixed; inset:0; z-index:999; display:flex; overflow:auto; }
+    @keyframes lb-in { from{opacity:0} to{opacity:1} }
+
+    .lb-left { flex:0 0 50%; max-width:50%; display:flex; align-items:center; justify-content:center; background:#000; min-height:100vh; }
+    .lb-left img, .lb-left video { max-width:96%; max-height:96vh; object-fit:contain; }
+    .lb-right { flex:0 0 50%; max-width:50%; background:var(--bg); overflow-y:auto; padding:28px 32px; min-height:100vh; }
+    @media(max-width:900px){
+      .lb { flex-direction:column; }
+      .lb-left, .lb-right { flex:none; max-width:100%; min-height:auto; }
+      .lb-left { height:50vh; }
+    }
+
+    .lb-close { position:fixed; top:16px; right:20px; z-index:1000; background:none; border:none; color:#fff; font-size:28px; cursor:pointer; opacity:0.7; }
+    .lb-close:hover { opacity:1; }
+
+    .lb-section { margin-bottom:18px; }
+    .lb-section h4 { margin:0 0 6px; font-size:11px; text-transform:uppercase; letter-spacing:0.06em; color:var(--muted); }
+    .lb-kv { display:grid; grid-template-columns: auto 1fr; gap:4px 12px; font-size:12px; }
+    .lb-kv dt { font-weight:600; white-space:nowrap; }
+    .lb-kv dd { margin:0; word-break:break-all; }
+
+    .lb-steps { width:100%; border-collapse:collapse; font-size:11px; }
+    .lb-steps th { text-align:left; font-size:9px; color:var(--muted); text-transform:uppercase; padding:4px 6px; border-bottom:1px solid var(--border); }
+    .lb-steps td { padding:4px 6px; border-bottom:1px solid var(--border); vertical-align:top; }
+
+    .lb-prompt { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11px; line-height:1.5; white-space:pre-wrap; background:rgba(8,10,0,0.03); padding:10px; margin:0; max-height:200px; overflow-y:auto; }
+
+    .lb-vars-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+    @media(max-width:900px){ .lb-vars-grid { grid-template-columns:1fr; } }
+    .lb-vars-box { background:rgba(8,10,0,0.03); padding:8px; overflow:auto; max-height:180px; }
+    .lb-vars-box h5 { margin:0 0 4px; font-size:10px; text-transform:uppercase; color:var(--muted); letter-spacing:0.04em; }
+    .lb-vars-box pre { margin:0; font-size:10px; white-space:pre-wrap; word-break:break-word; }
   </style>
+  ${extra}
 </head>
 <body>
 ${bodyHtml}
@@ -194,95 +255,291 @@ router.post("/logout", (req, res) => {
   return res.redirect("/admin/mma/login");
 });
 
-router.get("/", requireAuth, async (req, res) => {
+// ---- JSON API for infinite scroll ----
+router.get("/api/generations", requireAuth, async (req, res) => {
   const supabase = getSupabaseAdmin();
-  if (!supabase) {
-    return res.status(500).send(layout("Error", `<div class="err">SUPABASE_NOT_CONFIGURED</div>`));
-  }
+  if (!supabase) return res.status(500).json({ ok: false, error: "SUPABASE_NOT_CONFIGURED" });
 
-  const passId = (req.query.passId ? String(req.query.passId) : "").trim();
-  const limit = Math.max(1, Math.min(200, Number(req.query.limit || 50) || 50));
+  const passId = (req.query.passId || "").trim();
+  const cursor = (req.query.cursor || "").trim(); // ISO timestamp for keyset pagination
+  const limit = Math.max(1, Math.min(100, Number(req.query.limit || 60) || 60));
 
   let q = supabase
     .from("mega_generations")
-    .select(
-      "mg_generation_id, mg_pass_id, mg_parent_id, mg_mma_mode, mg_mma_status, mg_status, mg_output_url, mg_prompt, mg_created_at"
-    )
+    .select("mg_generation_id, mg_pass_id, mg_parent_id, mg_mma_mode, mg_mma_status, mg_status, mg_output_url, mg_prompt, mg_created_at")
     .eq("mg_record_type", "generation")
     .order("mg_created_at", { ascending: false })
     .limit(limit);
 
   if (passId) q = q.eq("mg_pass_id", passId);
+  if (cursor) q = q.lt("mg_created_at", cursor);
 
   const { data, error } = await q;
-  if (error) {
-    return res.status(500).send(layout("Error", `<div class="err">${escapeHtml(error.message)}</div>`));
-  }
+  if (error) return res.status(500).json({ ok: false, error: error.message });
 
-  const rows = (data || []).map((g) => {
-    const gid = g.mg_generation_id;
-    const status = g.mg_mma_status || g.mg_status || "—";
-    const mode = g.mg_mma_mode || "—";
-    const out = g.mg_output_url || "";
-    const badUrl =
-      out && !String(out).includes("assets.faltastudio.com") && !String(out).includes("r2") ? "bad" : "";
+  const items = (data || []).map((g) => ({
+    id: g.mg_generation_id,
+    passId: g.mg_pass_id || "",
+    parentId: g.mg_parent_id || "",
+    mode: g.mg_mma_mode || "",
+    status: g.mg_mma_status || g.mg_status || "",
+    url: g.mg_output_url || "",
+    prompt: g.mg_prompt || "",
+    createdAt: g.mg_created_at || "",
+  }));
 
-    return `
-      <tr>
-        <td class="mono">${escapeHtml(g.mg_created_at || "")}</td>
-        <td><span class="tag">${escapeHtml(status)}</span></td>
-        <td><span class="tag">${escapeHtml(mode)}</span></td>
-        <td class="mono">${escapeHtml(g.mg_pass_id || "")}</td>
-        <td class="mono">${escapeHtml(g.mg_parent_id || "")}</td>
-        <td class="mono ${badUrl}">
-          ${out ? `<a href="${escapeHtml(out)}" target="_blank" rel="noreferrer">${escapeHtml(out)}</a>` : "—"}
-          ${badUrl ? `<div class="muted">⚠️ not assets.faltastudio.com</div>` : ""}
-        </td>
-        <td class="mono">${escapeHtml(String(g.mg_prompt || "").slice(0, 160))}${String(g.mg_prompt || "").length > 160 ? "…" : ""}</td>
-        <td><a href="/admin/mma/generation/${encodeURIComponent(gid)}">Open</a></td>
-      </tr>
-    `;
-  });
+  const nextCursor = items.length === limit ? items[items.length - 1].createdAt : null;
+  return res.json({ ok: true, items, nextCursor });
+});
+
+// ---- JSON API for single generation detail ----
+router.get("/api/generation/:id", requireAuth, async (req, res) => {
+  const supabase = getSupabaseAdmin();
+  if (!supabase) return res.status(500).json({ ok: false, error: "SUPABASE_NOT_CONFIGURED" });
+
+  const id = String(req.params.id || "").trim();
+  const { data: gen } = await supabase
+    .from("mega_generations")
+    .select("*")
+    .eq("mg_record_type", "generation")
+    .eq("mg_generation_id", id)
+    .maybeSingle();
+
+  if (!gen) return res.status(404).json({ ok: false, error: "Not found" });
+
+  const { data: steps } = await supabase
+    .from("mega_generations")
+    .select("mg_step_no, mg_step_type, mg_payload, mg_created_at")
+    .eq("mg_record_type", "mma_step")
+    .eq("mg_generation_id", id)
+    .order("mg_step_no", { ascending: true });
+
+  return res.json({ ok: true, generation: gen, steps: steps || [] });
+});
+
+// ---- Main admin page (visual grid + infinite scroll + lightbox) ----
+router.get("/", requireAuth, async (req, res) => {
+  const passId = (req.query.passId ? String(req.query.passId) : "").trim();
 
   const html = layout(
     "MMA LogAdmin",
     `
     <div class="topbar">
       <div>
-        <h2 style="margin:0;">MMA LogAdmin</h2>
-        <div class="muted">Shows: inputs → GPT prompts → Replicate → R2 output → final</div>
+        <h2 style="margin:0; font-size:16px; font-weight:700; letter-spacing:0.02em;">MMA LogAdmin</h2>
+        <div class="muted" style="font-size:11px;">All generations across all users</div>
       </div>
-      <form method="POST" action="/admin/mma/logout">
-        <button class="btn" type="submit">Logout</button>
-      </form>
+      <div style="display:flex; gap:8px; align-items:center;">
+        <a class="btn btn--accent" href="/admin/mma/session-costs">Costs</a>
+        <form method="POST" action="/admin/mma/logout" style="margin:0;">
+          <button class="btn" type="submit">Logout</button>
+        </form>
+      </div>
     </div>
 
-    <form method="GET" action="/admin/mma" style="margin: 0 0 16px 0;">
-      <input type="text" name="passId" value="${escapeHtml(passId)}" placeholder="Filter by passId (optional)" />
-      <input type="text" name="limit" value="${escapeHtml(String(limit))}" style="width:90px;" />
-      <button class="btn" type="submit">Apply</button>
-      <a class="btn" href="/admin/mma" style="display:inline-block;">Reset</a>
-      <a class="btn" href="/admin/mma/session-costs" style="display:inline-block; background:#f0f7ff;">Session Costs</a>
-    </form>
+    <div style="display:flex; gap:8px; margin-bottom:14px; align-items:center; flex-wrap:wrap;">
+      <input type="text" id="filterPass" value="${escapeHtml(passId)}" placeholder="Filter by passId" style="width:240px;" />
+      <button class="btn" onclick="resetAndLoad()">Apply</button>
+      <button class="btn" onclick="document.getElementById('filterPass').value='';resetAndLoad()">Reset</button>
+      <span id="genCount" class="muted" style="font-size:11px; margin-left:8px;"></span>
+    </div>
 
-    <table>
-      <thead>
-        <tr>
-          <th>Created</th>
-          <th>Status</th>
-          <th>Mode</th>
-          <th>Pass</th>
-          <th>Parent</th>
-          <th>Output URL</th>
-          <th>Prompt (snippet)</th>
-          <th></th>
-        </tr>
-      </thead>
-      <tbody>
-        ${rows.join("\n")}
-      </tbody>
-    </table>
-  `
+    <div class="gen-grid" id="grid"></div>
+    <div id="loadMore" style="text-align:center; padding:20px;">
+      <span class="muted" style="font-size:11px;">Loading...</span>
+    </div>
+
+    <!-- Lightbox -->
+    <div id="lbBackdrop" class="lb-backdrop" style="display:none;" onclick="closeLb()"></div>
+    <div id="lb" class="lb" style="display:none;">
+      <button class="lb-close" onclick="closeLb()">&times;</button>
+      <div class="lb-left" id="lbMedia"></div>
+      <div class="lb-right" id="lbDetails"></div>
+    </div>
+  `,
+    `<script>
+    let items = [];
+    let cursor = null;
+    let loading = false;
+    let exhausted = false;
+
+    function getPassFilter() {
+      return (document.getElementById('filterPass').value || '').trim();
+    }
+
+    async function loadPage() {
+      if (loading || exhausted) return;
+      loading = true;
+      const params = new URLSearchParams({ limit: '60' });
+      const pf = getPassFilter();
+      if (pf) params.set('passId', pf);
+      if (cursor) params.set('cursor', cursor);
+
+      try {
+        const r = await fetch('/admin/mma/api/generations?' + params);
+        const j = await r.json();
+        if (!j.ok) { loading = false; return; }
+        items = items.concat(j.items);
+        cursor = j.nextCursor;
+        if (!j.nextCursor) exhausted = true;
+        renderItems(j.items);
+        document.getElementById('genCount').textContent = items.length + ' generations';
+        document.getElementById('loadMore').style.display = exhausted ? 'none' : 'block';
+      } catch(e) { console.error(e); }
+      loading = false;
+    }
+
+    function resetAndLoad() {
+      items = []; cursor = null; exhausted = false;
+      document.getElementById('grid').innerHTML = '';
+      loadPage();
+    }
+
+    function renderItems(batch) {
+      const grid = document.getElementById('grid');
+      batch.forEach((g, i) => {
+        const cell = document.createElement('div');
+        cell.className = 'gen-cell';
+        cell.onclick = () => openLb(g.id);
+
+        const isVideo = g.mode === 'video';
+        const hasUrl = !!g.url;
+        const statusOk = g.status === 'done' || g.status === 'completed';
+
+        if (hasUrl && isVideo) {
+          cell.innerHTML = '<video src="' + esc(g.url) + '" muted loop playsinline preload="metadata" loading="lazy"></video>';
+          cell.onmouseenter = () => { const v = cell.querySelector('video'); if(v) v.play().catch(()=>{}); };
+          cell.onmouseleave = () => { const v = cell.querySelector('video'); if(v) { v.pause(); v.currentTime=0; } };
+        } else if (hasUrl) {
+          cell.innerHTML = '<img src="' + esc(g.url) + '" loading="lazy" decoding="async" />';
+        } else {
+          cell.className += ' gen-cell--empty';
+          cell.innerHTML = '<span>' + esc(g.status || 'no output') + '</span>';
+        }
+
+        // Mode badge
+        if (isVideo) cell.innerHTML += '<span class="gen-badge gen-badge--video">VID</span>';
+
+        // Status badge
+        if (!statusOk && g.status) {
+          const cls = g.status === 'error' || g.status === 'failed' ? ' gen-status--err' : '';
+          cell.innerHTML += '<span class="gen-status' + cls + '">' + esc(g.status) + '</span>';
+        }
+
+        grid.appendChild(cell);
+      });
+    }
+
+    function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+    // Infinite scroll via IntersectionObserver
+    const io = new IntersectionObserver((entries) => {
+      if (entries[0].isIntersecting) loadPage();
+    }, { rootMargin: '600px' });
+    io.observe(document.getElementById('loadMore'));
+
+    // ---- Lightbox ----
+    async function openLb(id) {
+      document.getElementById('lbBackdrop').style.display = '';
+      document.getElementById('lb').style.display = '';
+      document.body.style.overflow = 'hidden';
+      document.getElementById('lbMedia').innerHTML = '<span class="muted" style="color:#999;">Loading...</span>';
+      document.getElementById('lbDetails').innerHTML = '';
+
+      try {
+        const r = await fetch('/admin/mma/api/generation/' + encodeURIComponent(id));
+        const j = await r.json();
+        if (!j.ok) { closeLb(); return; }
+        renderLb(j.generation, j.steps);
+      } catch(e) { closeLb(); }
+    }
+
+    function renderLb(gen, steps) {
+      const media = document.getElementById('lbMedia');
+      const det = document.getElementById('lbDetails');
+      const url = gen.mg_output_url || '';
+      const isVideo = gen.mg_mma_mode === 'video';
+
+      // Media
+      if (url && isVideo) {
+        media.innerHTML = '<video src="' + esc(url) + '" controls autoplay loop playsinline style="max-width:96%;max-height:96vh;object-fit:contain;"></video>';
+      } else if (url) {
+        media.innerHTML = '<img src="' + esc(url) + '" style="max-width:96%;max-height:96vh;object-fit:contain;" />';
+      } else {
+        media.innerHTML = '<span class="muted" style="color:#999;">No output</span>';
+      }
+
+      const status = gen.mg_mma_status || gen.mg_status || '—';
+      const mode = gen.mg_mma_mode || '—';
+      const statusCls = status === 'done' || status === 'completed' ? 'tag--ok' : status === 'error' || status === 'failed' ? 'tag--err' : '';
+      const modeCls = mode === 'video' ? 'tag--video' : mode === 'still' ? 'tag--still' : '';
+
+      // Cost data
+      const c = gen.mg_cost_data || {};
+      const costHtml = c.api_cost_usd != null ? '<div class="lb-section"><h4>Cost</h4><div class="lb-kv"><dt>Provider</dt><dd>$' + (c.api_cost_usd||0).toFixed(3) + '</dd><dt>Sell Price</dt><dd>$' + (c.sell_price_usd||0).toFixed(3) + '</dd><dt>Profit</dt><dd style="color:' + ((c.profit_usd||0) >= 0 ? '#1a7f37' : '#b00020') + '">$' + (c.profit_usd||0).toFixed(3) + '</dd><dt>Matchas</dt><dd>' + (c.matchas_charged||0) + '</dd></div></div>' : '';
+
+      // MMA Vars sections
+      const vars = gen.mg_mma_vars || {};
+      const varSections = ['inputs','assets','settings','prompts','outputs','audio'].filter(k => vars[k]);
+      const varsHtml = varSections.length ? '<div class="lb-section"><h4>Pipeline Data</h4><div class="lb-vars-grid">' + varSections.map(k => '<div class="lb-vars-box"><h5>' + esc(k) + '</h5><pre>' + esc(prettyJ(vars[k])) + '</pre></div>').join('') + '</div></div>' : '';
+
+      // Steps
+      let stepsHtml = '';
+      if (steps && steps.length) {
+        stepsHtml = '<div class="lb-section"><h4>Steps (' + steps.length + ')</h4><table class="lb-steps"><thead><tr><th>#</th><th>Type</th><th>Duration</th></tr></thead><tbody>';
+        steps.forEach(s => {
+          const p = s.mg_payload || {};
+          const t = p.timing || {};
+          const dur = t.duration_ms != null ? (t.duration_ms / 1000).toFixed(1) + 's' : '—';
+          stepsHtml += '<tr><td>' + esc(String(s.mg_step_no ?? '')) + '</td><td style="font-weight:600;">' + esc(s.mg_step_type || '') + '</td><td>' + dur + '</td></tr>';
+        });
+        stepsHtml += '</tbody></table></div>';
+      }
+
+      // Error
+      const errHtml = gen.mg_error ? '<div class="lb-section"><h4>Error</h4><pre class="lb-prompt" style="color:#b00020;">' + esc(prettyJ(gen.mg_error)) + '</pre></div>' : '';
+
+      det.innerHTML =
+        '<div class="lb-section"><h4>Generation</h4><div class="lb-kv">' +
+          '<dt>ID</dt><dd class="mono" style="font-size:10px;">' + esc(gen.mg_generation_id || '') + '</dd>' +
+          '<dt>Status</dt><dd><span class="tag ' + statusCls + '">' + esc(status) + '</span></dd>' +
+          '<dt>Mode</dt><dd><span class="tag ' + modeCls + '">' + esc(mode) + '</span></dd>' +
+          '<dt>Created</dt><dd>' + esc(fmtDate(gen.mg_created_at)) + '</dd>' +
+          '<dt>Pass</dt><dd class="mono" style="font-size:10px;"><a href="/admin/mma?passId=' + encodeURIComponent(gen.mg_pass_id||'') + '">' + esc(gen.mg_pass_id || '') + '</a></dd>' +
+          (gen.mg_parent_id ? '<dt>Parent</dt><dd class="mono" style="font-size:10px;">' + esc(gen.mg_parent_id) + '</dd>' : '') +
+        '</div></div>' +
+        costHtml +
+        '<div class="lb-section"><h4>Prompt</h4><pre class="lb-prompt">' + esc(gen.mg_prompt || '(none)') + '</pre></div>' +
+        errHtml +
+        stepsHtml +
+        varsHtml +
+        '<div style="margin-top:12px;"><a class="btn" href="/admin/mma/generation/' + encodeURIComponent(gen.mg_generation_id) + '.json" target="_blank">Download JSON</a></div>';
+    }
+
+    function prettyJ(o) { try { return JSON.stringify(o, null, 2); } catch { return String(o); } }
+    function fmtDate(s) { if (!s) return '—'; try { return new Date(s).toLocaleString(); } catch { return s; } }
+
+    function closeLb() {
+      document.getElementById('lbBackdrop').style.display = 'none';
+      document.getElementById('lb').style.display = 'none';
+      document.body.style.overflow = '';
+      // Stop any playing video
+      const v = document.querySelector('#lbMedia video');
+      if (v) { v.pause(); v.src = ''; }
+    }
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') closeLb();
+    });
+
+    // Enter key in filter input
+    document.getElementById('filterPass').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); resetAndLoad(); }
+    });
+
+    // Initial load
+    loadPage();
+    </script>`
   );
 
   res.status(200).send(html);
