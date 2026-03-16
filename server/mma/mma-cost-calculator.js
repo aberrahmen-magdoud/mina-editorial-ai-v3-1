@@ -16,9 +16,11 @@ const KLING_COSTS = {
   // model -> mode -> { perSecond, withAudio?, withVideo? }
   // Rates derived from billing: units/sec × KLING_UNIT_PRICE_USD
   "kling-v3-omni": {
-    // omni uses official listed rates (no billing data yet)
-    standard: { perSecond: 0.084, withAudio: 0.112, withVideo: 0.126 },
-    pro:      { perSecond: 0.112, withAudio: 0.14,  withVideo: 0.168 },
+    // Prepaid package rates: units/s × $0.09799/unit (consistent with kling-v3)
+    // std: 0.6u/s=$0.0588, 0.8u/s=$0.0784, 0.9u/s=$0.0882, 1.1u/s=$0.1078
+    // pro: 0.8u/s=$0.0784, 1.0u/s=$0.098,  1.2u/s=$0.1176, 1.4u/s=$0.1372
+    standard: { perSecond: 0.0588, withAudio: 0.0784, withVideo: 0.0882, withVideoAudio: 0.1078 },
+    pro:      { perSecond: 0.0784, withAudio: 0.098,  withVideo: 0.1176, withVideoAudio: 0.1372 },
   },
   "kling-v3": {
     // Verified from real Kling billing (March 2026):
@@ -120,7 +122,10 @@ const FIXED_COST_PER_GENERATION = TOTAL_FIXED_MONTHLY / EST_GENERATIONS_PER_MONT
 // ============================================================================
 // SELL PRICE (what we charge users in USD per matcha)
 // ============================================================================
-const MATCHA_SELL_PRICE_USD = Number(process.env.MINA_MATCHA_SELL_PRICE_USD || 0.035);
+// £0.30/matcha (standard packs) or £0.25/matcha (bulk 5000 pack)
+// Using GBP→USD ≈ 1.27
+const MATCHA_SELL_PRICE_USD = Number(process.env.MINA_MATCHA_SELL_PRICE_USD || 0.381);
+const MATCHA_SELL_PRICE_USD_BULK = 0.3175; // £0.25 × 1.27
 
 // ============================================================================
 // COST CALCULATOR FUNCTIONS
@@ -279,8 +284,11 @@ export function estimateGenerationCost(opts = {}) {
   const fixedOverhead = round(FIXED_COST_PER_GENERATION);
   const totalCostWithFixed = round(totalCost + fixedOverhead);
   sellPrice = round(matchasCharged * MATCHA_SELL_PRICE_USD);
+  const sellPriceBulk = round(matchasCharged * MATCHA_SELL_PRICE_USD_BULK);
   profit = round(sellPrice - totalCost);
+  const profitBulk = round(sellPriceBulk - totalCost);
   const profitAfterFixed = round(sellPrice - totalCostWithFixed);
+  const profitAfterFixedBulk = round(sellPriceBulk - totalCostWithFixed);
 
   return {
     api_cost_usd: totalCost,
@@ -289,10 +297,14 @@ export function estimateGenerationCost(opts = {}) {
     fixed_overhead_usd: fixedOverhead,
     total_cost_usd: totalCostWithFixed,
     sell_price_usd: sellPrice,
+    sell_price_bulk_usd: sellPriceBulk,
     profit_usd: profit,
+    profit_bulk_usd: profitBulk,
     profit_after_fixed_usd: profitAfterFixed,
+    profit_after_fixed_bulk_usd: profitAfterFixedBulk,
     matchas_charged: matchasCharged,
     matcha_unit_price_usd: MATCHA_SELL_PRICE_USD,
+    matcha_unit_price_bulk_usd: MATCHA_SELL_PRICE_USD_BULK,
     fixed_monthly_total_usd: TOTAL_FIXED_MONTHLY,
     est_generations_per_month: EST_GENERATIONS_PER_MONTH,
     ...costBreakdown,
