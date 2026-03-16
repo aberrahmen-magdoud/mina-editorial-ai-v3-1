@@ -2031,6 +2031,93 @@ async function runKlingMotionControl({
   };
 }
 
+// ============================================================================
+// Kling Omni (O3) — text/image/two-frame/audio-ref via omni-video endpoint
+// ============================================================================
+async function runKlingOmni({
+  prompt,
+  startImage,
+  endImage,
+  duration,
+  mode,
+  negativePrompt,
+  generateAudio,
+  input: forcedInput,
+}) {
+  const cfg = getMmaConfig();
+  const modelName =
+    safeStr(process.env.MMA_KLING_OMNI_MODEL_NAME, "") ||
+    safeStr(cfg?.kling_motion_control?.model_name, "") ||
+    "kling-v3-omni";
+
+  const hasStart = !!asHttpUrl(startImage);
+  const hasEnd = !!asHttpUrl(endImage);
+
+  const rawDuration = Number(duration || 5) || 5;
+  const finalDuration = Math.max(3, Math.min(15, Math.round(rawDuration)));
+  const finalMode = normalizeKlingSourceMode(
+    safeStr(mode, "") || safeStr(cfg?.kling?.mode, "") || safeStr(process.env.MMA_KLING_MODE, "") || "pro"
+  );
+
+  const finalNeg =
+    negativePrompt !== undefined
+      ? safeStr(negativePrompt, KLING_DEFAULT_NEGATIVE_PROMPT)
+      : safeStr(process.env.NEGATIVE_PROMPT_KLING || process.env.MMA_NEGATIVE_PROMPT_KLING || cfg?.kling?.negativePrompt, "")
+        || KLING_DEFAULT_NEGATIVE_PROMPT;
+
+  const finalPrompt = safeStr(prompt, "");
+  if (!finalPrompt) throw new Error("MISSING_KLING_OMNI_PROMPT");
+
+  const sound = generateAudio ? "on" : "off";
+
+  const image_list = [];
+  if (hasStart) image_list.push({ image_url: asHttpUrl(startImage), type: "first_frame" });
+  if (hasEnd) image_list.push({ image_url: asHttpUrl(endImage), type: "last_frame" });
+
+  const input = forcedInput ? { ...forcedInput } : {
+    model_name: modelName,
+    prompt: finalPrompt,
+    ...(image_list.length > 0 ? { image_list } : {}),
+    sound,
+    mode: finalMode,
+    duration: String(finalDuration),
+    ...(finalNeg ? { negative_prompt: finalNeg } : {}),
+  };
+
+  const t0 = Date.now();
+
+  const polled = await submitAndPollKlingTask({
+    createPath: "/v1/videos/omni-video",
+    queryPathFromTaskId: (taskId) => `/v1/videos/omni-video/${encodeURIComponent(taskId)}`,
+    body: input,
+    timeoutMs: Number(process.env.MMA_REPLICATE_MAX_MS_KLING || process.env.MMA_REPLICATE_MAX_MS || 900000) || 900000,
+    pollMs: REPLICATE_POLL_MS,
+  });
+
+  const finalStatus = extractKlingTaskStatus(polled.final);
+
+  return {
+    input,
+    out: polled.final?.data?.task_result || polled.final?.data || null,
+    prediction_id: polled.taskId,
+    prediction_status: finalStatus || null,
+    timed_out: !!polled.timedOut,
+    timing: {
+      started_at: new Date(t0).toISOString(),
+      ended_at: nowIso(),
+      duration_ms: Date.now() - t0,
+    },
+    provider: {
+      kling: {
+        createPath: "/v1/videos/omni-video",
+        task_id: polled.taskId,
+        createResponse: polled.created,
+        finalResponse: polled.final,
+      },
+    },
+  };
+}
+
 
 // ============================================================================
 // R2 Public store
@@ -2132,10 +2219,34 @@ function resolveVideoDurationSec(inputs) {
 }
 
 function resolveVideoPricing(inputsLike, assetsLike) {
-  const frame2 = resolveFrame2Reference(inputsLike, assetsLike);
-  if (frame2.kind === "ref_video") return { flow: "kling_motion_control" };
-  if (frame2.kind === "ref_audio") return { flow: "fabric_audio" };
-  return { flow: "kling" };
+  const inputs = inputsLike && typeof inputsLike === "object" ? inputsLike : {};
+  const frame2 = resolveFrame2Reference(inputs, assetsLike);
+
+  // Read the video lane from inputs (sent by frontend)
+  const videoLane = safeStr(
+    inputs.video_lane || inputs.videoLane || inputs.animate_lane || inputs.animateLane,
+    "short"
+  ).toLowerCase();
+  const isStory = videoLane === "story";
+
+  if (frame2.kind === "ref_video") {
+    return { flow: "kling_motion_control", videoLane, model: "kling-v3-omni" };
+  }
+  if (frame2.kind === "ref_audio") {
+    // Story mode: use O3 instead of Fabric. Short mode: also use O3 now (Fabric deprecated)
+    return { flow: "kling_omni_audio", videoLane, model: "kling-v3-omni" };
+  }
+  if (isStory) {
+    return { flow: "kling_omni", videoLane, model: "kling-v3-omni" };
+  }
+  // Short mode: V3 only for single-image, O3 for everything else
+  const hasStart = !!asHttpUrl(inputs.start_image_url || inputs.startImageUrl || inputs.image);
+  const hasEnd = !!asHttpUrl(inputs.end_image_url || inputs.endImageUrl || inputs.image_tail);
+  if (hasStart && !hasEnd) {
+    return { flow: "kling", videoLane, model: "kling-v3" };
+  }
+  // Text-only or two-frame → O3
+  return { flow: "kling_omni", videoLane, model: "kling-v3-omni" };
 }
 
 // ✅ cost rule:
@@ -3243,7 +3354,7 @@ async function runVideoAnimatePipeline({ supabase, generationId, passId, parent,
     if (!startImage) throw new Error("MISSING_START_IMAGE_FOR_VIDEO");
 
   const pricing = resolveVideoPricing(inputs0, working?.assets);
-  const flow = pricing.flow; // "kling" | "kling_motion_control" | "fabric_audio"
+  const flow = pricing.flow; // "kling" | "kling_motion_control" | "kling_omni" | "kling_omni_audio"
   
   working.inputs = { ...(working.inputs || {}), start_image_url: startImage };
   if (endImage) working.inputs.end_image_url = endImage;
@@ -3305,7 +3416,7 @@ const usePromptOverride = !!promptOverride;
   
     finalMotionPrompt = promptOverride;
   } else {
-    // 2) Always run GPT (even for fabric_audio + motion control)
+    // 2) Always run GPT (even for kling_omni_audio + motion control)
     const oneShotInput = {
       flow,
       frame2_kind: frame2?.kind || null, // "ref_audio" | "ref_video" | null
@@ -3478,7 +3589,7 @@ const usePromptOverride = !!promptOverride;
         const keepOriginalSound =
           working?.inputs?.keep_original_sound ?? working?.inputs?.keepOriginalSound ?? generateAudio;
 
-        working.meta = { ...(working.meta || {}), video_engine: "kling_motion_control" };
+        working.meta = { ...(working.meta || {}), video_engine: "kling_motion_control", video_lane: pricing.videoLane };
         await updateVars({ supabase, generationId, vars: working });
 
         genRes = await runKlingMotionControl({
@@ -3494,26 +3605,25 @@ const usePromptOverride = !!promptOverride;
         working.outputs = { ...(working.outputs || {}), kling_motion_control_prediction_id: genRes.prediction_id || null };
         stepType = "kling_motion_control_generate";
         await updateVars({ supabase, generationId, vars: working });
-      } else if (pricing.flow === "fabric_audio") {
-        if (!frame2?.url) throw new Error("MISSING_FRAME2_AUDIO_URL");
-
-        const resolution =
-          safeStr(working?.inputs?.resolution || working?.inputs?.fabric_resolution, "") || "720p";
-
-        working.meta = { ...(working.meta || {}), video_engine: "fabric_audio" };
+      } else if (pricing.flow === "kling_omni_audio" || pricing.flow === "kling_omni") {
+        working.meta = { ...(working.meta || {}), video_engine: pricing.flow, video_lane: pricing.videoLane };
         await updateVars({ supabase, generationId, vars: working });
 
-        genRes = await runFabricAudio({
-          image: startImage,
-          audio: frame2.url,
-          resolution,
+        genRes = await runKlingOmni({
+          prompt: finalMotionPrompt,
+          startImage,
+          endImage,
+          duration,
+          mode,
+          negativePrompt: neg,
+          generateAudio,
         });
 
-        working.outputs = { ...(working.outputs || {}), fabric_prediction_id: genRes.prediction_id || null };
-        stepType = "fabric_generate";
+        working.outputs = { ...(working.outputs || {}), kling_prediction_id: genRes.prediction_id || null };
+        stepType = pricing.flow === "kling_omni_audio" ? "kling_omni_audio_generate" : "kling_omni_generate";
         await updateVars({ supabase, generationId, vars: working });
       } else {
-        working.meta = { ...(working.meta || {}), video_engine: "kling" };
+        working.meta = { ...(working.meta || {}), video_engine: "kling", video_lane: pricing.videoLane };
         await updateVars({ supabase, generationId, vars: working });
 
         genRes = await runKling({
@@ -3550,34 +3660,7 @@ const usePromptOverride = !!promptOverride;
 
     let remote = pickFirstUrl(out);
 
-    // Fallback: if 2-frame video returned no URL, retry without image_tail
-    if (!remote && asHttpUrl(endImage) && stepType === "kling_generate") {
-      console.warn(`[mma] VIDEO_NO_URL with image_tail — retrying without end frame (${generationId})`);
-      working = pushUserMessageLine(working, "something broke and i am choosing to call it a plot twist");
-      await updateVars({ supabase, generationId, vars: working });
-      emitLine(generationId, working);
-
-      const retryRes = await runKling({
-        prompt: finalMotionPrompt,
-        startImage,
-        endImage: null, // drop end frame
-        duration,
-        mode,
-        negativePrompt: neg,
-        generateAudio,
-      });
-
-      await writeStep({
-        supabase,
-        generationId,
-        passId,
-        stepNo: stepNo++,
-        stepType: "kling_generate_retry_no_tail",
-        payload: { input: retryRes.input, output: retryRes.out, timing: retryRes.timing, error: null },
-      });
-
-      remote = pickFirstUrl(retryRes.out);
-    }
+    // Note: end-frame retry removed — sound:off bug is fixed in V3/O3.
 
     if (!remote) {
       const err = new Error("VIDEO_NO_URL");
@@ -3597,7 +3680,8 @@ const usePromptOverride = !!promptOverride;
     working.outputs = { ...(working.outputs || {}) };
     working.outputs.kling_video_url = remoteUrl;
     
-    if (pricing.flow === "fabric_audio") working.outputs.fabric_video_url = remoteUrl;
+    if (pricing.flow === "kling_omni_audio") working.outputs.kling_omni_audio_video_url = remoteUrl;
+    if (pricing.flow === "kling_omni") working.outputs.kling_omni_video_url = remoteUrl;
     if (pricing.flow === "kling_motion_control") working.outputs.kling_motion_control_video_url = remoteUrl;
 
     working.mg_output_url = remoteUrl;
@@ -3840,6 +3924,8 @@ async function runVideoTweakPipeline({ supabase, generationId, passId, parent, v
       if (pricing.flow === "kling_motion_control") {
         if (!frame2?.url) throw new Error("MISSING_FRAME2_VIDEO_URL");
 
+        working.meta = { ...(working.meta || {}), video_engine: "kling_motion_control", video_lane: pricing.videoLane };
+
         genRes = await runKlingMotionControl({
           prompt: finalMotionPrompt,
           image: startImage,
@@ -3852,17 +3938,23 @@ async function runVideoTweakPipeline({ supabase, generationId, passId, parent, v
         });
 
         stepType = "kling_motion_control_generate_tweak";
-      } else if (pricing.flow === "fabric_audio") {
-        if (!frame2?.url) throw new Error("MISSING_FRAME2_AUDIO_URL");
+      } else if (pricing.flow === "kling_omni_audio" || pricing.flow === "kling_omni") {
+        working.meta = { ...(working.meta || {}), video_engine: pricing.flow, video_lane: pricing.videoLane };
 
-        genRes = await runFabricAudio({
-          image: startImage,
-          audio: frame2.url,
-          resolution: safeStr(mergedInputs0?.resolution || mergedInputs0?.fabric_resolution, "") || "720p",
+        genRes = await runKlingOmni({
+          prompt: finalMotionPrompt,
+          startImage,
+          endImage,
+          duration,
+          mode,
+          negativePrompt: neg,
+          generateAudio,
         });
 
-        stepType = "fabric_generate_tweak";
+        stepType = pricing.flow === "kling_omni_audio" ? "kling_omni_audio_generate_tweak" : "kling_omni_generate_tweak";
       } else {
+        working.meta = { ...(working.meta || {}), video_engine: "kling", video_lane: pricing.videoLane };
+
         genRes = await runKling({
           prompt: finalMotionPrompt,
           startImage,

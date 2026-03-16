@@ -30,6 +30,11 @@ const KLING_COSTS = {
     standard: { perSecond: 0.0588, withAudio: 0.0882, withVideo: 0.1176 },
     pro:      { perSecond: 0.0784, withAudio: 0.1176, withVideo: 0.1568 },
   },
+  "kling-o1": {
+    // O1 has no audio support
+    standard: { perSecond: 0.0588 },
+    pro:      { perSecond: 0.0784, withVideo: 0.1176 },
+  },
   "kling-v2.6": {
     // per-block pricing: standard 5s=$0.21, 10s=$0.42 ; pro 5s=$0.35, 10s=$0.70
     standard: { perSecond: 0.042 },
@@ -250,11 +255,20 @@ export function estimateGenerationCost(opts = {}) {
       });
       costBreakdown.provider = "kling_motion_control";
     } else if (modelUsed.includes("fabric")) {
-      // Fabric audio-to-video
+      // Legacy Fabric — keep for historical cost estimation
       modelCost = estimateFabricCost({ durationSec, resolution: fabricResolution });
       costBreakdown.provider = "fabric";
+    } else if (modelUsed.includes("omni") || modelUsed.includes("o3")) {
+      // Kling Omni (O3) — Story mode or Short+multi-frame/text-only
+      modelCost = estimateKlingCost({
+        modelName: "kling-v3-omni",
+        mode: videoMode,
+        durationSec,
+        hasAudio,
+      });
+      costBreakdown.provider = "kling_omni";
     } else {
-      // Standard Kling video
+      // Standard Kling video (V3 — Short+single-image)
       modelCost = estimateKlingCost({
         modelName: modelUsed || "kling-v3",
         mode: videoMode,
