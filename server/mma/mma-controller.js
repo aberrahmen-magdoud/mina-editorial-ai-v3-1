@@ -2250,10 +2250,10 @@ function resolveVideoPricing(inputsLike, assetsLike) {
 }
 
 // ✅ cost rule:
-// - always 2 matchas per second (1s = 2 matchas)
-// - normal kling: 5s => 10, 10s => 20
-// - ref video: duration clamped to max 30s, then *2
-// - ref audio: duration clamped to max 60s, then *2
+// - always 1 matcha per second (1s = 1 matcha)
+// - normal kling: 5s => 5, 10s => 10
+// - ref video: duration clamped to max 30s, then *1
+// - ref audio: duration clamped to max 60s, then *1
 function videoCostFromInputs(inputsLike, assetsLike) {
   const inputs = inputsLike && typeof inputsLike === "object" ? inputsLike : {};
   const frame2 = resolveFrame2Reference(inputs, assetsLike);
@@ -2274,11 +2274,11 @@ function videoCostFromInputs(inputsLike, assetsLike) {
     const raw = rawProvided || fallback;
 
     const billedSeconds = _clamp(raw, 1, maxSec);
-    return billedSeconds * 2;
+    return billedSeconds * 1;
   }
 
   const sec = resolveVideoDurationSec(inputs);
-  return sec * 2;
+  return sec * 1;
 }
 
 function resolveStillLaneFromInputs(inputsLike) {

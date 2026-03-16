@@ -130,7 +130,7 @@ Source (retrieved 2025-12-19): Zoho admin help doc: https://www.zoho.com/mail/he
 
 **Credit mapping (your spec):**
 - **1 still = 1 credit**
-- **1 video = 5 credits**
+- **1 video = 1 credit per second** (e.g. 5s = 5 credits)
 - **MINA‑50** pack = **50 credits** = up to **50 stills** or **10 videos** (or a mix)
 
 **Vendor variable costs you stated (inputs):**
@@ -172,7 +172,7 @@ Assumptions:
 - MINA‑50 = 50 credits
 - Still cost = $0.03
 - Video cost = $0.90
-- Credits: 1 still=1, 1 video=5
+- Credits: 1 still=1, 1 video=1 per second (5s=5)
 
 Worst/best-case variable costs per pack:
 - **All stills**: 50 × $0.03 = **$1.50**
