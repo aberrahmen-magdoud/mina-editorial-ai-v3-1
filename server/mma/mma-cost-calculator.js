@@ -282,13 +282,20 @@ export function estimateGenerationCost(opts = {}) {
       // Legacy seedream generations
       modelCost = estimateSeedreamCost();
       costBreakdown.provider = "seedream";
+    } else if (lane === "niche") {
+      // Niche uses NanoBanana Pro (Gemini Pro 4K) — $0.22/image
+      modelCost = estimateGeminiImageCost({
+        model: "gemini-3-pro-image-preview",
+        resolution: resolution || "4K",
+      });
+      costBreakdown.provider = "nanobanana";
     } else {
-      // Both niche (nanobanana) and main use Gemini
+      // Main lane uses Gemini Flash 4K — $0.15/image
       modelCost = estimateGeminiImageCost({
         model: modelUsed || "gemini-3.1-flash-image-preview",
         resolution,
       });
-      costBreakdown.provider = lane === "niche" ? "nanobanana" : "gemini";
+      costBreakdown.provider = "gemini";
     }
   } else if (mode === "fingertips") {
     modelCost = estimateFingertipsCost({ modelKey: fingertipsKey });
