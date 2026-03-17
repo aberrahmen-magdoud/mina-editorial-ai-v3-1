@@ -278,15 +278,17 @@ export function estimateGenerationCost(opts = {}) {
       costBreakdown.provider = "kling";
     }
   } else if (mode === "still") {
-    if (lane === "niche" || modelUsed.includes("seedream") || modelUsed.includes("bytedance")) {
+    if (modelUsed && (modelUsed.includes("seedream") || modelUsed.includes("bytedance"))) {
+      // Legacy seedream generations
       modelCost = estimateSeedreamCost();
       costBreakdown.provider = "seedream";
     } else {
+      // Both niche (nanobanana) and main use Gemini
       modelCost = estimateGeminiImageCost({
         model: modelUsed || "gemini-3.1-flash-image-preview",
         resolution,
       });
-      costBreakdown.provider = "gemini";
+      costBreakdown.provider = lane === "niche" ? "nanobanana" : "gemini";
     }
   } else if (mode === "fingertips") {
     modelCost = estimateFingertipsCost({ modelKey: fingertipsKey });
