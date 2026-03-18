@@ -1,0 +1,978 @@
+// ./server/fingertips/fingertips-controller.js
+// Controller for Fingertips feature — fractional-matcha billing + Replicate model calls.
+//
+// BILLING MODEL ("pool" system):
+//   1. Each fingertips model costs a fraction of 1 matcha (e.g. 0.1, 0.2, 0.5).
+//   2. On first use (or when pool is exhausted), we deduct 1 WHOLE matcha from
+//      the user's main balance and add 1.0 to their "fingertips pool".
+//   3. Each generation then subtracts its cost from the pool.
+//   4. When pool < model cost, another matcha is deducted.
+//   5. Pool state is stored in mega_customers.mg_mma_preferences.fingertips_pool.
+//
+// This means the user always sees whole-matcha deductions but gets multiple
+// generations per matcha depending on the model used.
+
+import crypto from "node:crypto";
+import Replicate from "replicate";
+import OpenAI from "openai";
+import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+
+import {
+  megaEnsureCustomer,
+  megaGetCredits,
+  megaAdjustCredits,
+  megaHasCreditRef,
+} from "../../mega-db.js";
+
+import { getSupabaseAdmin } from "../../supabase.js";
+import { replicatePredictWithTimeout } from "../mma/replicate-poll.js";
+import { FINGERTIPS_MODELS, getFingertipsModel, FINGERTIPS_MODEL_KEYS } from "./fingertips-config.js";
+import { estimateGenerationCost } from "../mma/mma-cost-calculator.js";
+
+// ============================================================================
+// Replicate client (shared singleton)
+// ============================================================================
+let _replicate = null;
+function getReplicate() {
+  if (_replicate) return _replicate;
+  if (!process.env.REPLICATE_API_TOKEN) throw new Error("REPLICATE_API_TOKEN_MISSING");
+  _replicate = new Replicate({ auth: process.env.REPLICATE_API_TOKEN });
+  return _replicate;
+}
+
+// ============================================================================
+// OpenAI client (shared singleton — for clarity-upscaler image description)
+// ============================================================================
+let _openai = null;
+function getOpenAI() {
+  if (_openai) return _openai;
+  if (!process.env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY_MISSING");
+  _openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  return _openai;
+}
+
+// ============================================================================
+// GPT Vision: describe an image in hyper-detail for clarity-upscaler
+// ============================================================================
+async function describeImageForUpscale(imageUrl) {
+  const openai = getOpenAI();
+
+  const systemPrompt = `You are an expert image analyst. Given an image, produce a CONCISE description (maximum 60 words) of what is visible: subject, key materials/textures, lighting, and dominant colors. This will be used as a prompt for an AI upscaler — keep it short and keyword-rich. Output ONLY the description text, nothing else.`;
+
+  const resp = await openai.chat.completions.create({
+    model: "gpt-4o",
+    messages: [
+      { role: "system", content: systemPrompt },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "Describe this image in hyper-realistic detail for an AI upscaler:" },
+          { type: "image_url", image_url: { url: imageUrl, detail: "high" } },
+        ],
+      },
+    ],
+    max_tokens: 150,
+  });
+
+  return (resp.choices?.[0]?.message?.content || "").trim();
+}
+
+function isCudaOutOfMemoryError(err) {
+  const text = [
+    err?.message,
+    err?.error,
+    err?.provider?.error,
+    err?.provider?.logs,
+  ]
+    .filter(Boolean)
+    .join("\n")
+    .toLowerCase();
+
+  return text.includes("cuda out of memory") || text.includes("outofmemoryerror") || text.includes("oom");
+}
+
+function buildMagicUpscaleFallbackInput(input) {
+  const out = { ...(input || {}) };
+  out.resolution = "2048";
+  out.steps = Math.min(Number(out.steps || 20), 16);
+  out.creativity = Math.min(Number(out.creativity ?? 0.25), 0.2);
+  out.guidance_scale = Math.min(Number(out.guidance_scale || 7), 6);
+  return out;
+}
+
+// ============================================================================
+// GPT: rewrite flux-fill / bria genfill prompt with explicit KEEP vs CHANGE
+// intent, and produce a negative_prompt for unwanted elements.
+// Returns { prompt, negative_prompt }
+// ============================================================================
+// ============================================================================
+// GPT Vision: describe image + generate expansion prompt for Bria Expand
+// Returns { prompt, negative_prompt }
+// ============================================================================
+async function rewriteExpandPrompt(imageUrl) {
+  const openai = getOpenAI();
+
+  const systemPrompt = `You are an expert image analyst and art director. Given an image that needs to be expanded (outpainted) beyond its borders, analyze what is visible and produce a JSON object with exactly two keys:
+  "prompt" — a compact, highly-detailed description (max 80 words) of how the expanded area should look. Describe the continuation of the scene: background elements, surfaces, textures, lighting direction, color palette, and atmosphere that should seamlessly extend beyond the original borders. Be specific about materials and environment.
+  "negative_prompt" — a short list of things to avoid: "blur, distortion, artifacts, text, watermark, low quality, bad anatomy, inconsistent lighting, seams, visible borders, mismatched textures"
+Return ONLY the JSON object, no markdown, no explanation.`;
+
+  const resp = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      { role: "system", content: systemPrompt },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "Analyze this image and describe how it should be expanded beyond its borders:" },
+          { type: "image_url", image_url: { url: imageUrl, detail: "high" } },
+        ],
+      },
+    ],
+    max_tokens: 300,
+    temperature: 0.3,
+  });
+
+  const raw = (resp.choices?.[0]?.message?.content || "").trim();
+
+  try {
+    const cleaned = raw.replace(/^```(?:json)?\s*/, "").replace(/\s*```$/, "");
+    const parsed = JSON.parse(cleaned);
+    return {
+      prompt: String(parsed.prompt || "").trim(),
+      negative_prompt: String(parsed.negative_prompt || "blur, distortion, artifacts, text, watermark, low quality, bad anatomy, inconsistent lighting, seams, visible borders, mismatched textures").trim(),
+    };
+  } catch {
+    return {
+      prompt: raw || "seamless continuation of the scene with consistent lighting, textures, and atmosphere",
+      negative_prompt: "blur, distortion, artifacts, text, watermark, low quality, bad anatomy, inconsistent lighting, seams, visible borders, mismatched textures",
+    };
+  }
+}
+
+async function rewriteGenfillPrompt(userPrompt) {
+  const openai = getOpenAI();
+
+  const systemPrompt = `You rewrite inpainting prompts for an AI image editor (Bria GenFill).
+Given the user's edit request, return a JSON object with exactly two keys:
+  "prompt" — a compact, highly-detailed positive prompt that describes what should appear in the masked area. Preserve composition, camera angle, lighting, perspective, and identity unless the user explicitly asks otherwise.
+  "negative_prompt" — a short list of things to avoid (artifacts, blur, distortion, unrelated objects, text, watermarks).
+Return ONLY the JSON object, no markdown, no explanation.`;
+
+  const resp = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      { role: "system", content: systemPrompt },
+      {
+        role: "user",
+        content: `User edit request: ${String(userPrompt || "").trim()}`,
+      },
+    ],
+    max_tokens: 300,
+    temperature: 0.3,
+  });
+
+  const raw = (resp.choices?.[0]?.message?.content || "").trim();
+
+  try {
+    // Strip markdown code fences if GPT wraps the JSON
+    const cleaned = raw.replace(/^```(?:json)?\s*/, "").replace(/\s*```$/, "");
+    const parsed = JSON.parse(cleaned);
+    return {
+      prompt: String(parsed.prompt || userPrompt || "").trim(),
+      negative_prompt: String(parsed.negative_prompt || "").trim(),
+    };
+  } catch {
+    // Fallback: treat entire response as prompt, use default negative
+    return {
+      prompt: raw || String(userPrompt || "").trim(),
+      negative_prompt: "blur, distortion, artifacts, text, watermark, low quality",
+    };
+  }
+}
+
+// ============================================================================
+// R2 storage — normalize Replicate URLs to permanent assets bucket
+// ============================================================================
+let _r2 = null;
+function getR2() {
+  if (_r2) return _r2;
+  const accountId = process.env.R2_ACCOUNT_ID || "";
+  const endpoint = process.env.R2_ENDPOINT || (accountId ? `https://${accountId}.r2.cloudflarestorage.com` : "");
+  const accessKeyId = process.env.R2_ACCESS_KEY_ID || "";
+  const secretAccessKey = process.env.R2_SECRET_ACCESS_KEY || "";
+  const bucket = process.env.R2_BUCKET || "";
+  const publicBase = process.env.R2_PUBLIC_BASE_URL || "";
+  const enabled = !!(endpoint && accessKeyId && secretAccessKey && bucket && publicBase);
+  const client = enabled
+    ? new S3Client({ region: "auto", endpoint, credentials: { accessKeyId, secretAccessKey } })
+    : null;
+  _r2 = { enabled, client, bucket, publicBase };
+  return _r2;
+}
+
+function guessExt(url, fallback = ".png") {
+  try {
+    const p = new URL(url).pathname.toLowerCase();
+    if (p.endsWith(".png")) return ".png";
+    if (p.endsWith(".jpg") || p.endsWith(".jpeg")) return ".jpg";
+    if (p.endsWith(".webp")) return ".webp";
+    if (p.endsWith(".gif")) return ".gif";
+    if (p.endsWith(".svg")) return ".svg";
+    return fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+async function storeToR2(url, keyPrefix) {
+  const { enabled, client, bucket, publicBase } = getR2();
+  if (!enabled || !client) return url; // R2 not configured — pass through
+  if (!url || typeof url !== "string") return url;
+  if (publicBase && url.startsWith(publicBase)) return url; // already ours
+
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`R2_FETCH_FAILED_${res.status}`);
+
+  const buf = Buffer.from(await res.arrayBuffer());
+  const contentType = res.headers.get("content-type") || "application/octet-stream";
+  const ext = guessExt(url, ".png");
+  const objKey = `${keyPrefix}${ext}`;
+
+  await client.send(
+    new PutObjectCommand({
+      Bucket: bucket,
+      Key: objKey,
+      Body: buf,
+      ContentType: contentType,
+    })
+  );
+
+  return `${publicBase.replace(/\/$/, "")}/${objKey}`;
+}
+
+// ============================================================================
+// Small helpers
+// ============================================================================
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function safeStr(v, fallback = "") {
+  if (v === null || v === undefined) return fallback;
+  const s = typeof v === "string" ? v : String(v);
+  const t = s.trim();
+  return t ? t : fallback;
+}
+
+function makeHttpError(statusCode, code, extra = {}) {
+  const err = new Error(code);
+  err.statusCode = statusCode;
+  err.code = code;
+  Object.assign(err, extra);
+  return err;
+}
+
+// ============================================================================
+// Pool management (reads/writes mg_mma_preferences.fingertips_pool)
+// ============================================================================
+async function readFingertipsPool(supabase, passId) {
+  const { data } = await supabase
+    .from("mega_customers")
+    .select("mg_mma_preferences")
+    .eq("mg_pass_id", passId)
+    .maybeSingle();
+
+  const prefs = data?.mg_mma_preferences;
+  const pool = Number(prefs?.fingertips_pool || 0);
+  return { pool: pool > 0 ? pool : 0, prefs: prefs || {} };
+}
+
+async function writeFingertipsPool(supabase, passId, prefs, newPool) {
+  await supabase
+    .from("mega_customers")
+    .update({
+      mg_mma_preferences: { ...prefs, fingertips_pool: newPool },
+      mg_mma_preferences_updated_at: nowIso(),
+      mg_updated_at: nowIso(),
+    })
+    .eq("mg_pass_id", passId);
+}
+
+// ============================================================================
+// chargeFingertips — the core pool billing logic
+//
+// 1. Read current pool from preferences.
+// 2. If pool >= modelCost → deduct from pool, done.
+// 3. Else → deduct 1 whole matcha from main balance, add 1.0 to pool,
+//    then deduct modelCost from pool.
+// 4. Write updated pool back to preferences.
+//
+// Returns { charged, matchasDeducted, poolBefore, poolAfter }
+// ============================================================================
+export async function chargeFingertips({ passId, generationId, modelKey }) {
+  const model = getFingertipsModel(modelKey);
+  if (!model) throw makeHttpError(400, "UNKNOWN_FINGERTIPS_MODEL", { modelKey });
+
+  const cost = model.costPerGeneration;
+  const supabase = getSupabaseAdmin();
+  if (!supabase) throw new Error("SUPABASE_NOT_CONFIGURED");
+
+  // Idempotency: check if this generation was already charged
+  const refType = "fingertips_charge";
+  const refId = `fingertips:${generationId}`;
+  const already = await megaHasCreditRef({ refType, refId });
+  if (already) return { charged: true, already: true, cost };
+
+  // Read pool
+  const { pool: currentPool, prefs } = await readFingertipsPool(supabase, passId);
+  let pool = currentPool;
+  let matchasDeducted = 0;
+
+  // If pool is insufficient, deduct 1 whole matcha
+  if (pool < cost) {
+    // Check user has at least 1 matcha
+    const { credits } = await megaGetCredits(passId);
+    if (credits < 1) {
+      throw makeHttpError(402, "INSUFFICIENT_CREDITS", {
+        passId,
+        balance: credits,
+        needed: 1,
+        details: {
+          userMessage: `you've got ${credits} matcha left. fingertips needs at least 1 matcha to start. top up to keep going.`,
+          balance: credits,
+          needed: 1,
+          modelKey,
+          modelLabel: model.label,
+          costPerGeneration: cost,
+          generationsPerMatcha: Math.floor(1 / cost),
+          actions: [{ id: "buy_matcha", label: "Buy matcha", enabled: true }],
+        },
+      });
+    }
+
+    // Deduct 1 matcha (idempotent via ref)
+    await megaAdjustCredits({
+      passId,
+      delta: -1,
+      reason: "fingertips_pool_refill",
+      source: "fingertips",
+      refType,
+      refId,
+      grantedAt: nowIso(),
+    });
+
+    pool += 1.0;
+    matchasDeducted = 1;
+  } else {
+    // Pool has enough — write an idempotency marker directly (megaAdjustCredits rejects delta=0)
+    const supabaseAdmin = getSupabaseAdmin();
+    if (supabaseAdmin) {
+      const txTs = nowIso();
+      await supabaseAdmin.from("mega_generations").insert({
+        mg_id: `credit_transaction:${crypto.randomUUID()}`,
+        mg_record_type: "credit_transaction",
+        mg_pass_id: passId,
+        mg_delta: 0,
+        mg_reason: "fingertips_pool_draw",
+        mg_source: "fingertips",
+        mg_ref_type: refType,
+        mg_ref_id: refId,
+        mg_status: "succeeded",
+        mg_meta: { pool_before: pool, pool_cost: cost },
+        mg_payload: null,
+        mg_event_at: txTs,
+        mg_created_at: txTs,
+        mg_updated_at: txTs,
+      });
+    }
+  }
+
+  // Deduct model cost from pool
+  const poolBefore = pool;
+  pool = Math.round((pool - cost) * 100) / 100; // avoid floating-point drift
+  if (pool < 0) pool = 0;
+
+  // Persist updated pool
+  await writeFingertipsPool(supabase, passId, prefs, pool);
+
+  return {
+    charged: true,
+    already: false,
+    cost,
+    matchasDeducted,
+    poolBefore,
+    poolAfter: pool,
+    modelKey,
+  };
+}
+
+// ============================================================================
+// refundFingertips — on failure, restore pool (and matcha if pool was just refilled)
+// ============================================================================
+export async function refundFingertips({ passId, generationId, modelKey }) {
+  const model = getFingertipsModel(modelKey);
+  if (!model) return { refunded: false };
+
+  const cost = model.costPerGeneration;
+  const refType = "fingertips_refund";
+  const refId = `fingertips:${generationId}`;
+
+  const already = await megaHasCreditRef({ refType, refId });
+  if (already) return { refunded: false, already: true };
+
+  const supabase = getSupabaseAdmin();
+  if (!supabase) return { refunded: false };
+
+  // Add cost back to pool
+  const { pool: currentPool, prefs } = await readFingertipsPool(supabase, passId);
+  const newPool = Math.round((currentPool + cost) * 100) / 100;
+  await writeFingertipsPool(supabase, passId, prefs, newPool);
+
+  // Record refund in ledger (idempotent marker — delta=0 so write directly)
+  if (supabase) {
+    const txTs = nowIso();
+    await supabase.from("mega_generations").insert({
+      mg_id: `credit_transaction:${crypto.randomUUID()}`,
+      mg_record_type: "credit_transaction",
+      mg_pass_id: passId,
+      mg_delta: 0,
+      mg_reason: "fingertips_pool_refund",
+      mg_source: "fingertips",
+      mg_ref_type: refType,
+      mg_ref_id: refId,
+      mg_status: "succeeded",
+      mg_meta: { pool_refunded: cost, pool_after: newPool },
+      mg_payload: null,
+      mg_event_at: txTs,
+      mg_created_at: txTs,
+      mg_updated_at: txTs,
+    });
+  }
+
+  return { refunded: true, cost, poolAfter: newPool };
+}
+
+// ============================================================================
+// Upload data URLs to R2 (mask images from frontend canvas)
+// ============================================================================
+async function uploadDataUrlToR2(dataUrl, keyPrefix) {
+  const { enabled, client, bucket, publicBase } = getR2();
+  if (!enabled || !client) throw new Error("R2_NOT_CONFIGURED_FOR_MASK_UPLOAD");
+
+  const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+  if (!match) throw new Error("INVALID_DATA_URL");
+
+  const contentType = match[1];
+  const buf = Buffer.from(match[2], "base64");
+  const ext = contentType.includes("png") ? ".png" : ".jpg";
+  const objKey = `${keyPrefix}${ext}`;
+
+  await client.send(
+    new PutObjectCommand({
+      Bucket: bucket,
+      Key: objKey,
+      Body: buf,
+      ContentType: contentType,
+    })
+  );
+
+  return `${publicBase.replace(/\/$/, "")}/${objKey}`;
+}
+
+// ============================================================================
+// validateInputs — check required inputs against the model's schema
+// Also uploads any data URL inputs (masks) to R2 for Replicate compatibility
+// ============================================================================
+async function validateInputs(modelKey, userInputs, generationId) {
+  const model = getFingertipsModel(modelKey);
+  if (!model) throw makeHttpError(400, "UNKNOWN_FINGERTIPS_MODEL", { modelKey });
+
+  const schema = model.inputSchema;
+  const normalizedInputs = { ...(userInputs || {}) };
+
+  // Compatibility: Bria expand supports both `image` and `image_url`.
+  if (modelKey === "expand" && !normalizedInputs.image && normalizedInputs.image_url) {
+    normalizedInputs.image = normalizedInputs.image_url;
+  }
+
+  // Compatibility: Bria eraser clients may use image_url/mask_url while schema uses image/mask_image.
+  if (modelKey === "eraser") {
+    if (!normalizedInputs.image && normalizedInputs.image_url) normalizedInputs.image = normalizedInputs.image_url;
+    if (!normalizedInputs.mask_image && normalizedInputs.mask_url) normalizedInputs.mask_image = normalizedInputs.mask_url;
+  }
+
+  // Quality policy: if a model supports output_format, force PNG for best quality/lossless export.
+  if (Object.prototype.hasOwnProperty.call(schema, "output_format")) {
+    normalizedInputs.output_format = "png";
+  }
+
+  const cleaned = {};
+  const missing = [];
+
+  for (const [param, spec] of Object.entries(schema)) {
+    if (modelKey === "expand" && param === "image_url") continue;
+    let value = normalizedInputs?.[param];
+
+    if (spec.required && (value === undefined || value === null || value === "")) {
+      missing.push(param);
+      continue;
+    }
+
+    if (value !== undefined && value !== null && value !== "") {
+      // Upload data URLs to R2 (canvas mask images from frontend)
+      if (spec.type === "uri" && typeof value === "string" && value.startsWith("data:")) {
+        value = await uploadDataUrlToR2(value, `fingertips/mask/${generationId}_${param}`);
+      }
+      cleaned[param] = value;
+    } else if (spec.default !== undefined) {
+      cleaned[param] = spec.default;
+    }
+  }
+
+  if (missing.length > 0) {
+    throw makeHttpError(400, "MISSING_REQUIRED_INPUTS", {
+      modelKey,
+      missing,
+      message: `Missing required inputs for ${model.label}: ${missing.join(", ")}`,
+    });
+  }
+
+  return cleaned;
+}
+
+// ============================================================================
+// normalizeReplicateInputForModel — provider-specific input compatibility
+// ============================================================================
+function normalizeReplicateInputForModel(modelKey, input) {
+  const out = { ...(input || {}) };
+
+  // Bria eraser naming compatibility:
+  // - Frontend sends image + mask_image.
+  // - Provider accepts url/file variants, so provide both URL and file keys.
+  if (modelKey === "eraser") {
+    const mask = out.mask_image || out.mask_url || out.mask_file;
+    const image = out.image || out.image_url || out.image_file;
+
+    if (image && !out.image_url) out.image_url = image;
+    if (image && !out.image_file) out.image_file = image;
+
+    if (mask && !out.mask_url) out.mask_url = mask;
+    if (mask && !out.mask_file) out.mask_file = mask;
+
+    delete out.mask_image;
+  }
+
+  return out;
+}
+
+// ============================================================================
+// runFingertipsModel — call Replicate and return result
+// ============================================================================
+async function runFingertipsModel({ modelKey, input }) {
+  const model = getFingertipsModel(modelKey);
+  const replicate = getReplicate();
+  const replicateInput = normalizeReplicateInputForModel(modelKey, input);
+
+  const { predictionId, prediction, timedOut, elapsedMs } = await replicatePredictWithTimeout({
+    replicate,
+    version: model.replicateModel,
+    input: replicateInput,
+    timeoutMs: 180000, // 3 min for image tools
+    pollMs: 2000,
+  });
+
+  return {
+    predictionId,
+    prediction,
+    timedOut,
+    elapsedMs,
+    output: prediction?.output || null,
+    status: prediction?.status || "unknown",
+  };
+}
+
+// ============================================================================
+// handleFingertipsGenerate — main entry point
+//
+// Expects: { passId, modelKey, inputs }
+// Returns: { generation_id, status, output, model, credits_cost, pool }
+// ============================================================================
+export async function handleFingertipsGenerate({ passId, modelKey, inputs }) {
+  if (!passId) throw makeHttpError(400, "PASS_ID_REQUIRED");
+  if (!modelKey || !getFingertipsModel(modelKey)) {
+    throw makeHttpError(400, "UNKNOWN_FINGERTIPS_MODEL", {
+      modelKey,
+      availableModels: FINGERTIPS_MODEL_KEYS,
+    });
+  }
+
+  const model = getFingertipsModel(modelKey);
+  const generationId = crypto.randomUUID();
+  const supabase = getSupabaseAdmin();
+
+  // 1. Validate inputs (async — uploads data URL masks to R2)
+  const cleanedInputs = await validateInputs(modelKey, inputs || {}, generationId);
+
+  // 2. Charge (pool-based)
+  const chargeResult = await chargeFingertips({ passId, generationId, modelKey });
+
+  // 3. Write generation record
+  const ts = nowIso();
+  if (supabase) {
+    await supabase.from("mega_generations").insert({
+      mg_id: `generation:${generationId}`,
+      mg_record_type: "generation",
+      mg_generation_id: generationId,
+      mg_pass_id: passId,
+      mg_mma_mode: "fingertips",
+      mg_mma_status: "generating",
+      mg_status: "pending",
+      mg_provider: "replicate",
+      mg_model: model.replicateModel,
+      mg_mma_vars: {
+        modelKey,
+        inputs: cleanedInputs,
+        charge: chargeResult,
+      },
+      mg_created_at: ts,
+      mg_updated_at: ts,
+    });
+  }
+
+  // 3b. Upscaler GPT vision: auto-describe image for prompt-based upscalers
+  if (modelKey === "upscale" && (model.variant === "clarity" || model.variant === "magic")) {
+    try {
+      const gptDescription = await describeImageForUpscale(cleanedInputs.image);
+      const suffix = model.defaultSuffix || "";
+      cleanedInputs.prompt = gptDescription + (suffix ? ", " + suffix : "");
+    } catch (err) {
+      // Fallback: use suffix only if GPT fails
+      cleanedInputs.prompt = model.defaultSuffix || "high quality, detailed";
+    }
+    cleanedInputs.negative_prompt = cleanedInputs.negative_prompt || model.defaultNegative || "";
+
+    // Avoid OOM on very large source images by defaulting magic upscale to 2048.
+    if (model.variant === "magic" && !cleanedInputs.resolution) {
+      cleanedInputs.resolution = "2048";
+    }
+  }
+
+  // 3c. Bria GenFill (flux_fill key): rewrite user prompt via GPT and generate negative_prompt.
+  if (modelKey === "flux_fill" && cleanedInputs.prompt) {
+    try {
+      const { prompt, negative_prompt } = await rewriteGenfillPrompt(cleanedInputs.prompt);
+      if (prompt) cleanedInputs.prompt = prompt;
+      if (negative_prompt) cleanedInputs.negative_prompt = negative_prompt;
+    } catch (err) {
+      // Fallback: keep original user prompt if GPT rewriting fails.
+    }
+  }
+
+  // 3d. Bria Expand: GPT-describe image for expansion prompt + force 4K canvas + negative prompt.
+  if (modelKey === "expand") {
+    // Generate GPT context prompt describing how the expansion should look
+    try {
+      const { prompt, negative_prompt } = await rewriteExpandPrompt(cleanedInputs.image);
+      if (prompt) cleanedInputs.prompt = prompt;
+      if (negative_prompt) cleanedInputs.negative_prompt = negative_prompt;
+    } catch (err) {
+      // Fallback: generic expansion prompt + quality negative
+      cleanedInputs.prompt = cleanedInputs.prompt || "seamless continuation of the scene with consistent lighting, textures, and atmosphere";
+      cleanedInputs.negative_prompt = "blur, distortion, artifacts, text, watermark, low quality, bad anatomy, inconsistent lighting, seams, visible borders, mismatched textures";
+    }
+
+    // Force 4K output: convert aspect_ratio to explicit 4K canvas_size
+    if (cleanedInputs.aspect_ratio && !cleanedInputs.canvas_size) {
+      const FOUR_K_MAP = {
+        "1:1":   [3840, 3840],
+        "16:9":  [3840, 2160],
+        "9:16":  [2160, 3840],
+        "4:3":   [3840, 2880],
+        "3:4":   [2880, 3840],
+        "3:2":   [3840, 2560],
+        "2:3":   [2560, 3840],
+        "4:5":   [3072, 3840],
+        "5:4":   [3840, 3072],
+      };
+      const mapped = FOUR_K_MAP[cleanedInputs.aspect_ratio];
+      if (mapped) {
+        cleanedInputs.canvas_size = mapped;
+        delete cleanedInputs.aspect_ratio;
+      }
+    }
+  }
+
+  // 4. Call Replicate
+  let result;
+  let finalInputsUsed = cleanedInputs;
+  try {
+    result = await runFingertipsModel({ modelKey, input: finalInputsUsed });
+  } catch (err) {
+    // Retry once for magic upscaler on CUDA OOM with safer parameters.
+    const canRetryMagicOom = modelKey === "upscale" && model?.variant === "magic" && isCudaOutOfMemoryError(err);
+    if (canRetryMagicOom) {
+      try {
+        finalInputsUsed = buildMagicUpscaleFallbackInput(cleanedInputs);
+        result = await runFingertipsModel({ modelKey, input: finalInputsUsed });
+      } catch (retryErr) {
+        err = retryErr;
+      }
+    }
+
+    if (result) {
+      // Retry succeeded.
+    } else {
+      // Refund on failure
+      const refundResult = await refundFingertips({ passId, generationId, modelKey });
+
+    // Update generation record
+    if (supabase) {
+      await supabase
+        .from("mega_generations")
+        .update({
+          mg_mma_status: "error",
+          mg_status: "failed",
+          mg_error: {
+            code: err?.code || "REPLICATE_ERROR",
+            message: err?.message || String(err),
+            provider: err?.provider || null,
+          },
+          mg_mma_vars: {
+            modelKey,
+            inputs: finalInputsUsed,
+            charge: chargeResult,
+            refund: refundResult,
+          },
+          mg_updated_at: nowIso(),
+        })
+        .eq("mg_id", `generation:${generationId}`);
+    }
+
+      throw makeHttpError(502, "FINGERTIPS_GENERATION_FAILED", {
+        generationId,
+        modelKey,
+        refunded: refundResult.refunded,
+        message: err?.message || String(err),
+      });
+    }
+  }
+
+  // 5. Handle timeout
+  if (result.timedOut) {
+    if (supabase) {
+      await supabase
+        .from("mega_generations")
+        .update({
+          mg_mma_status: "generating",
+          mg_status: "pending",
+          mg_meta: { predictionId: result.predictionId, timedOut: true, elapsedMs: result.elapsedMs },
+          mg_updated_at: nowIso(),
+        })
+        .eq("mg_id", `generation:${generationId}`);
+    }
+
+    return {
+      generation_id: generationId,
+      status: "processing",
+      model: model.replicateModel,
+      model_key: modelKey,
+      prediction_id: result.predictionId,
+      credits_cost: chargeResult.cost,
+      matchas_deducted: chargeResult.matchasDeducted,
+      pool_remaining: chargeResult.poolAfter,
+      message: "Generation is still processing. Poll /fingertips/generations/:id for result.",
+    };
+  }
+
+  // 6. Success — extract output URL, store to R2 (NEVER expose provider URLs)
+  const rawOutputUrl = extractOutputUrl(result.output);
+
+  if (!rawOutputUrl) {
+    console.error("[fingertips] extractOutputUrl returned null for model", modelKey,
+      "| prediction:", result.predictionId,
+      "| output type:", typeof result.output,
+      "| output:", JSON.stringify(result.output)?.slice(0, 500));
+
+    // Refund — no usable output
+    const refundResult = await refundFingertips({ passId, generationId, modelKey });
+    if (supabase) {
+      await supabase
+        .from("mega_generations")
+        .update({
+          mg_mma_status: "error",
+          mg_status: "failed",
+          mg_error: { code: "NO_OUTPUT_URL", message: "Provider returned no usable image." },
+          mg_mma_vars: { modelKey, inputs: finalInputsUsed, charge: chargeResult, refund: refundResult },
+          mg_updated_at: nowIso(),
+        })
+        .eq("mg_id", `generation:${generationId}`);
+    }
+    throw makeHttpError(502, "FINGERTIPS_GENERATION_FAILED", {
+      generationId, modelKey, refunded: refundResult.refunded,
+      message: "Generation produced no image. You were not charged.",
+    });
+  }
+
+  // Always persist to our own R2 — never return provider URLs to the client
+  let outputUrl;
+  try {
+    outputUrl = await storeToR2(rawOutputUrl, `fingertips/${modelKey}/${generationId}`);
+  } catch (e) {
+    console.error("[fingertips] storeToR2 failed for model", modelKey, ":", e?.message || e);
+
+    // Refund — we can't serve a provider URL
+    const refundResult = await refundFingertips({ passId, generationId, modelKey });
+    if (supabase) {
+      await supabase
+        .from("mega_generations")
+        .update({
+          mg_mma_status: "error",
+          mg_status: "failed",
+          mg_error: { code: "R2_STORE_FAILED", message: "Failed to store generated image." },
+          mg_mma_vars: { modelKey, inputs: finalInputsUsed, charge: chargeResult, refund: refundResult },
+          mg_updated_at: nowIso(),
+        })
+        .eq("mg_id", `generation:${generationId}`);
+    }
+    throw makeHttpError(502, "FINGERTIPS_GENERATION_FAILED", {
+      generationId, modelKey, refunded: refundResult.refunded,
+      message: "Could not save generated image. You were not charged.",
+    });
+  }
+
+  if (supabase) {
+    let costData = null;
+    try {
+      costData = estimateGenerationCost({
+        mode: "fingertips",
+        fingertipsKey: modelKey,
+        matchasCharged: chargeResult.cost || 0,
+      });
+    } catch {}
+
+    await supabase
+      .from("mega_generations")
+      .update({
+        mg_mma_status: "done",
+        mg_status: "succeeded",
+        mg_output_url: outputUrl,
+        mg_latency_ms: result.elapsedMs,
+        mg_meta: { predictionId: result.predictionId },
+        ...(costData ? { mg_cost_data: costData } : {}),
+        mg_updated_at: nowIso(),
+      })
+      .eq("mg_id", `generation:${generationId}`);
+  }
+
+  return {
+    generation_id: generationId,
+    status: "done",
+    model_key: modelKey,
+    output_url: outputUrl,
+    prediction_id: result.predictionId,
+    elapsed_ms: result.elapsedMs,
+    credits_cost: chargeResult.cost,
+    matchas_deducted: chargeResult.matchasDeducted,
+    pool_remaining: chargeResult.poolAfter,
+  };
+}
+
+// ============================================================================
+// fetchFingertipsGeneration — get status of a fingertips generation
+// ============================================================================
+export async function fetchFingertipsGeneration(generationId) {
+  const supabase = getSupabaseAdmin();
+  if (!supabase) return null;
+
+  const { data, error } = await supabase
+    .from("mega_generations")
+    .select("*")
+    .eq("mg_generation_id", generationId)
+    .eq("mg_record_type", "generation")
+    .maybeSingle();
+
+  if (error || !data) return null;
+
+  return {
+    generation_id: data.mg_generation_id,
+    status: data.mg_mma_status,
+    mode: data.mg_mma_mode,
+    model: data.mg_model,
+    model_key: data.mg_mma_vars?.modelKey || null,
+    output_url: data.mg_output_url || null,
+    error: data.mg_error || null,
+    latency_ms: data.mg_latency_ms || null,
+    created_at: data.mg_created_at,
+    updated_at: data.mg_updated_at,
+  };
+}
+
+// ============================================================================
+// getPoolStatus — return current pool balance for a user
+// ============================================================================
+export async function getPoolStatus(passId) {
+  const supabase = getSupabaseAdmin();
+  if (!supabase) return { pool: 0 };
+
+  const { pool } = await readFingertipsPool(supabase, passId);
+  const { credits, expiresAt } = await megaGetCredits(passId);
+
+  return {
+    pool,
+    matchaBalance: credits,
+    expiresAt,
+  };
+}
+
+// ============================================================================
+// listModels — return available models + their costs and schemas
+// ============================================================================
+export function listFingertipsModels() {
+  return Object.entries(FINGERTIPS_MODELS).map(([key, model]) => ({
+    key,
+    label: model.label,
+    description: model.description,
+    replicateModel: model.replicateModel,
+    costPerGeneration: model.costPerGeneration,
+    generationsPerMatcha: Math.floor(1 / model.costPerGeneration),
+    inputSchema: model.inputSchema,
+  }));
+}
+
+// ============================================================================
+// Helper: extract URL from various Replicate output formats
+// ============================================================================
+function extractOutputUrl(output) {
+  if (!output) return null;
+
+  // Plain string URL (most common)
+  if (typeof output === "string") return output;
+
+  // FileOutput objects (Replicate SDK >=1.0) — have .url() method or .url property
+  if (typeof output === "object" && !Array.isArray(output)) {
+    if (typeof output.url === "function") return output.url();
+    if (typeof output.url === "string" && output.url) return output.url;
+    // Some models return { image: "url" } or { output: "url" }
+    if (typeof output.image === "string" && output.image) return output.image;
+    if (typeof output.output === "string" && output.output) return output.output;
+    // toString() fallback for FileOutput-like objects
+    const str = String(output);
+    if (str && str.startsWith("http")) return str;
+  }
+
+  // Array of URLs or FileOutput objects
+  if (Array.isArray(output) && output.length > 0) {
+    const first = output[0];
+    if (typeof first === "string") return first;
+    if (typeof first === "object" && first) {
+      if (typeof first.url === "function") return first.url();
+      if (typeof first.url === "string" && first.url) return first.url;
+    }
+    const str = String(first);
+    if (str && str.startsWith("http")) return str;
+  }
+
+  console.warn("[fingertips] extractOutputUrl: unrecognized output format:", typeof output, JSON.stringify(output)?.slice(0, 300));
+  return null;
+}
