@@ -20,6 +20,12 @@ router.get("/public/download", async (req, res) => {
     res.setHeader("Access-Control-Allow-Origin", "*");
     if (cl) res.setHeader("Content-Length", cl);
 
+    // Build download filename from query param or URL path
+    const rawName = String(req.query.filename || "").trim();
+    const fallbackName = decodeURIComponent(new URL(url).pathname.split("/").pop() || "download");
+    const dlName = (rawName || fallbackName).replace(/[\r\n"]/g, "_");
+    res.setHeader("Content-Disposition", `attachment; filename="${dlName}"`);
+
     const buf = Buffer.from(await upstream.arrayBuffer());
     res.end(buf);
   } catch (err) {
