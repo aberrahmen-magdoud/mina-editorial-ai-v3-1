@@ -192,7 +192,7 @@ export async function runUgcPipeline({ supabase, generationId, passId, vars }) {
           duration: shotDuration,
           mode: "standard",
           negativePrompt: plan.negative_prompt || KLING_DEFAULT_NEGATIVE_PROMPT,
-          generateAudio: false, // audio added in stitch step
+          generateAudio: inputs.generate_audio !== false,
         });
       } catch (shotErr) {
         console.error(`[ugc] shot ${i + 1} generation failed:`, shotErr?.message || shotErr);
