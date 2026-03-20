@@ -17,6 +17,7 @@ export const MMA_COSTS = {
   still_main: 1,
   still_niche: 2,
   video: 10,
+  ugc_per_shot: 10,
   typeForMePer: 10,
   typeForMeCharge: 1,
 };

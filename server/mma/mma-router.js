@@ -16,6 +16,7 @@ import {
   refreshFromReplicate,
   registerSseClient,
 } from "./mma-controller.js";
+import { handleMmaUgcCreate } from "./mma-ugc-handler.js";
 import { getSupabaseAdmin } from "../../supabase.js";
 import { megaEnsureCustomer, resolvePassId as megaResolvePassId } from "../../mega-db.js";
 import { sendDone, sendStatus } from "./mma-sse.js";
@@ -102,6 +103,23 @@ router.post("/video/:generation_id/tweak", async (req, res) => {
     console.error("[mma] video tweak error", err);
     res.status(err?.statusCode || 500).json({
       error: err?.message === "INSUFFICIENT_CREDITS" ? "INSUFFICIENT_CREDITS" : "MMA_VIDEO_TWEAK_FAILED",
+      message: err?.message,
+      details: err?.details || undefined,
+    });
+  }
+});
+
+router.post("/ugc/create", async (req, res) => {
+  const { passId, body } = withPassId(req, req.body);
+
+  try {
+    res.set("X-Mina-Pass-Id", passId);
+    const result = await handleMmaUgcCreate({ body });
+    res.json(result);
+  } catch (err) {
+    console.error("[mma] ugc/create error", err);
+    res.status(err?.statusCode || 500).json({
+      error: err?.message === "INSUFFICIENT_CREDITS" ? "INSUFFICIENT_CREDITS" : "MMA_UGC_CREATE_FAILED",
       message: err?.message,
       details: err?.details || undefined,
     });
